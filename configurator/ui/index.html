@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAD4 Configurator — Electric Mirror</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+  :root {
+    --em-dark:    #1a1a2e;
+    --em-green:   #2d6a4f;
+    --em-red:     #8b1a1a;
+    --em-accent:  #00b4d8;
+    --em-panel:   #16213e;
+    --em-border:  #0f3460;
+    --em-text:    #e0e0e0;
+    --em-sub:     #a0a0b0;
+    --em-input:   #0d1b2a;
+    --em-green-btn: #1b7a3e;
+    --em-red-btn:   #922b2b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: var(--em-dark);
+    color: var(--em-text);
+    min-height: 100vh;
+  }
+
+  /* ── HEADER ── */
+  header {
+    background: #0a0a14;
+    border-bottom: 2px solid var(--em-accent);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header .brand { font-size: 1.1rem; font-weight: 700; letter-spacing: 2px; color: var(--em-accent); }
+  header .title { font-size: 1rem; font-weight: 600; color: var(--em-sub); }
+
+  /* ── LAYOUT ── */
+  .configurator {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 0;
+    min-height: calc(100vh - 56px);
+  }
+
+  /* ── LEFT PANEL — MIRROR PREVIEW ── */
+  .preview-panel {
+    background: var(--em-panel);
+    border-right: 1px solid var(--em-border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px;
+    gap: 16px;
+  }
+  .mirror-preview {
+    width: 160px;
+    height: 160px;
+    background: linear-gradient(135deg, #2a2a3a 0%, #1a1a28 100%);
+    border: 2px solid var(--em-border);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .mirror-preview::before {
+    content: '';
+    position: absolute;
+    inset: 8px;
+    background: linear-gradient(135deg, #3a3a4a 0%, #20202e 60%);
+    border: 1px solid rgba(0,180,216,0.3);
+  }
+  .mirror-preview .led-ring {
+    position: absolute;
+    inset: 4px;
+    border: 3px solid rgba(255,220,100,0.7);
+    box-shadow: 0 0 8px rgba(255,220,100,0.4), inset 0 0 8px rgba(255,220,100,0.1);
+    animation: ledGlow 2s ease-in-out infinite alternate;
+  }
+  @keyframes ledGlow {
+    from { box-shadow: 0 0 6px rgba(255,220,100,0.4), inset 0 0 6px rgba(255,220,100,0.1); }
+    to   { box-shadow: 0 0 14px rgba(255,220,100,0.7), inset 0 0 12px rgba(255,220,100,0.2); }
+  }
+  .preview-label { font-size: 0.65rem; color: var(--em-sub); text-align: center; line-height: 1.4; }
+
+  /* CPN display */
+  .cpn-display {
+    background: var(--em-input);
+    border: 1px solid var(--em-accent);
+    border-radius: 4px;
+    padding: 8px 10px;
+    width: 100%;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--em-accent);
+    word-break: break-all;
+    text-align: center;
+    min-height: 36px;
+    transition: all 0.2s;
+  }
+
+  /* Action buttons */
+  .btn-release, .btn-cancel {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-release {
+    background: var(--em-green-btn);
+    color: #fff;
+  }
+  .btn-release:hover { background: #23a455; transform: translateY(-1px); }
+  .btn-release:active { transform: translateY(0); }
+  .btn-cancel {
+    background: var(--em-red-btn);
+    color: #fff;
+  }
+  .btn-cancel:hover { background: #c0392b; transform: translateY(-1px); }
+
+  /* ── RIGHT PANEL — FORM ── */
+  .form-panel {
+    padding: 24px 32px;
+    overflow-y: auto;
+  }
+
+  .form-section {
+    margin-bottom: 20px;
+  }
+
+  .form-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  label.field-label {
+    font-size: 0.78rem;
+    color: var(--em-sub);
+    font-weight: 500;
+    min-width: 80px;
+  }
+
+  select, input[type="number"], input[type="text"] {
+    background: var(--em-input);
+    border: 1px solid var(--em-border);
+    color: var(--em-text);
+    border-radius: 3px;
+    padding: 5px 8px;
+    font-size: 0.82rem;
+    font-family: 'Inter', sans-serif;
+    transition: border-color 0.2s;
+  }
+  select:focus, input:focus {
+    outline: none;
+    border-color: var(--em-accent);
+    box-shadow: 0 0 0 2px rgba(0,180,216,0.15);
+  }
+  input[type="number"] { width: 70px; }
+
+  /* Dimming radio group */
+  .radio-group {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .radio-group label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.82rem;
+    cursor: pointer;
+    color: var(--em-text);
+  }
+  input[type="radio"] { accent-color: var(--em-accent); }
+
+  /* Checkbox grid */
+  .checkbox-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px 16px;
+    margin-top: 8px;
+  }
+  .checkbox-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    cursor: pointer;
+  }
+  input[type="checkbox"] { accent-color: var(--em-accent); width: 14px; height: 14px; }
+
+  /* Divider */
+  hr { border: none; border-top: 1px solid var(--em-border); margin: 16px 0; }
+
+  /* ── STATUS BAR ── */
+  .status-bar {
+    background: #0a0a14;
+    border-top: 1px solid var(--em-border);
+    padding: 8px 24px;
+    display: flex;
+    gap: 32px;
+    font-size: 0.75rem;
+    color: var(--em-sub);
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+  }
+  .status-bar span strong { color: var(--em-text); }
+  .status-bar .status-ok  { color: #2ecc71; }
+  .status-bar .status-err { color: #e74c3c; }
+
+  /* Loading state */
+  .loading { opacity: 0.6; pointer-events: none; }
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.2);
+    border-top-color: var(--em-accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .section-title {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--em-accent);
+    margin-bottom: 10px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="brand">⚡ ELECTRIC MIRROR</span>
+  <span class="title">RAD4 Configurator — Standalone v1.0</span>
+</header>
+
+<div class="configurator">
+
+  <!-- LEFT: Preview + Actions -->
+  <div class="preview-panel">
+    <div class="mirror-preview">
+      <div class="led-ring"></div>
+    </div>
+    <div class="preview-label">Image for basic visual reference only</div>
+
+    <div class="cpn-display" id="cpnDisplay">RAD4-36.00X36.00-RM-LSE-30K-NK04</div>
+
+    <button class="btn-release" id="btnRelease" onclick="doRelease()">RELEASE</button>
+    <button class="btn-cancel"  id="btnCancel"  onclick="doCancel()">CANCEL</button>
+  </div>
+
+  <!-- RIGHT: Form -->
+  <div class="form-panel">
+
+    <div class="form-section">
+      <div class="section-title">Mirror Configuration</div>
+
+      <div class="form-row">
+        <label class="field-label">Mirror Type</label>
+        <select id="mirrorType" disabled>
+          <option value="RAD4" selected>RAD4</option>
+        </select>
+
+        <label class="field-label">Width (in)</label>
+        <input type="number" id="unitWidth" value="36" min="12" max="84" step="0.25" oninput="updatePreview()">
+
+        <label class="field-label">Height (in)</label>
+        <input type="number" id="unitHeight" value="36" min="12" max="60" step="0.25" oninput="updatePreview()">
+      </div>
+
+      <div class="form-row">
+        <label class="field-label">Mount Type</label>
+        <select id="mountType" onchange="updatePreview()">
+          <option value="RM" selected>RM — Recessed</option>
+          <option value="SM">SM — Surface</option>
+        </select>
+
+        <label class="field-label">Voltage</label>
+        <select id="voltage" onchange="updatePreview()">
+          <option value="Standard" selected>Standard</option>
+          <option value="277V">277V</option>
+        </select>
+
+        <label class="field-label">Glass Type</label>
+        <select id="glassType" onchange="updatePreview()">
+          <option value="Standard" selected>Standard</option>
+        </select>
+      </div>
+
+      <div class="form-row">
+        <label class="field-label">Lighting</label>
+        <select id="lighting" onchange="updatePreview()">
+          <option value="LO" selected>LO — Low Output</option>
+          <option value="SO">SO — Standard Output</option>
+          <option value="LSE">LSE — Standard Enclosed</option>
+          <option value="LHE">LHE — High Enclosed</option>
+        </select>
+
+        <label class="field-label">LED Temp</label>
+        <select id="ledTemp" onchange="updatePreview()">
+          <option value="27K">27K</option>
+          <option value="30K" selected>30K</option>
+          <option value="35K">35K</option>
+          <option value="40K">40K</option>
+        </select>
+
+        <label class="field-label">Finish</label>
+        <select id="finish" onchange="updatePreview()">
+          <option value="NK04" selected>NK04 (01A)</option>
+          <option value="CH04">CH04</option>
+          <option value="BN04">BN04</option>
+          <option value="MB04">MB04</option>
+          <option value="PB04">PB04</option>
+          <option value="PN04">PN04</option>
+        </select>
+      </div>
+    </div>
+
+    <hr>
+
+    <!-- DIMMING -->
+    <div class="form-section">
+      <div class="section-title">Dimming</div>
+      <div class="radio-group">
+        <label><input type="radio" name="dimming" value="" checked onchange="updatePreview()"> No Dimming</label>
+        <label><input type="radio" name="dimming" value="D1"   onchange="updatePreview()"> Dimming (D1-HEP)</label>
+        <label><input type="radio" name="dimming" value="D2"   onchange="updatePreview()"> Dimming (D2-Triac)</label>
+        <label><input type="radio" name="dimming" value="AC"   onchange="updatePreview()"> Alexa</label>
+        <label><input type="radio" name="dimming" value="AK"   onchange="updatePreview()"> Ava</label>
+        <label><input type="radio" name="dimming" value="KC"   onchange="updatePreview()"> Keen</label>
+      </div>
+    </div>
+
+    <hr>
+
+    <!-- OPTIONS CHECKBOXES -->
+    <div class="form-section">
+      <div class="section-title">Options</div>
+      <div class="checkbox-grid">
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkSavvy"        onchange="updatePreview()"> Savvy
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkCordConnect"  onchange="updatePreview()"> Cord Connect
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkClock"        onchange="updatePreview()"> Clock
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkDefogger"     onchange="updatePreview()"> Defogger
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkNonBrilliant" onchange="updatePreview()"> Non Brilliant
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkNightLight"   onchange="updatePreview()"> Night Light
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkTV"           onchange="updatePreview()"> TV
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkVive"         onchange="updatePreview()"> Vive
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkWallGlow"     onchange="updatePreview()"> Wall Glow
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkWardrobe"     onchange="updatePreview()"> Wardrobe
+        </label>
+      </div>
+    </div>
+
+  </div><!-- /form-panel -->
+</div><!-- /configurator -->
+
+<!-- STATUS BAR -->
+<div class="status-bar" id="statusBar">
+  <span id="statPower">Power Required: <strong>—</strong></span>
+  <span id="statAvail">Power Available: <strong>—</strong></span>
+  <span id="statEnc">Enclosure: <strong>—</strong></span>
+  <span id="statStatus">Status: <strong class="status-ok">Ready</strong></span>
+</div>
+
+<script>
+  // Debounce timer for preview calls
+  let previewTimer = null;
+
+  function getFormData() {
+    const dimming = document.querySelector('input[name="dimming"]:checked')?.value || "";
+    const isAva   = ["AC","AD","AE","AF","AK"].includes(dimming);
+    const isKeen  = ["KC","KD","KG","KH"].includes(dimming);
+
+    return {
+      UnitWidth:       parseFloat(document.getElementById('unitWidth').value)  || 36,
+      UnitHeight:      parseFloat(document.getElementById('unitHeight').value) || 36,
+      MountType:       document.getElementById('mountType').value,
+      Lighting:        document.getElementById('lighting').value,
+      LEDColorTemp:    document.getElementById('ledTemp').value,
+      Finish:          document.getElementById('finish').value,
+      Voltage:         document.getElementById('voltage').value,
+      DimmingType:     dimming,
+      Ava:             isAva,
+      Keen:            isKeen,
+      Clock:           document.getElementById('chkClock').checked,
+      ClockType:       document.getElementById('chkClock').checked ? "CK1" : "",
+      CordConnect:     document.getElementById('chkCordConnect').checked,
+      CordConnectType: document.getElementById('chkCordConnect').checked ? "CC" : "",
+      Defogger:        document.getElementById('chkDefogger').checked,
+      NightLight:      document.getElementById('chkNightLight').checked,
+      NightLightType:  document.getElementById('chkNightLight').checked ? "NL1" : "",
+      NonBrilliant:    document.getElementById('chkNonBrilliant').checked,
+      Savvy:           document.getElementById('chkSavvy').checked,
+      TV:              document.getElementById('chkTV').checked,
+      Vive:            document.getElementById('chkVive').checked,
+      ViveType:        document.getElementById('chkVive').checked ? "VV" : "",
+      WallGlow:        document.getElementById('chkWallGlow').checked,
+      WallGlowType:    document.getElementById('chkWallGlow').checked ? "WG" : "",
+      Wardrobe:        document.getElementById('chkWardrobe').checked,
+    };
+  }
+
+  async function updatePreview() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      const data = getFormData();
+      try {
+        const resp = await fetch('/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        const r = await resp.json();
+
+        document.getElementById('cpnDisplay').textContent = r.CPN;
+        document.getElementById('statPower').innerHTML =
+          `Power Required: <strong>${r.PowerRequired} Watts</strong>`;
+        document.getElementById('statAvail').innerHTML =
+          `Power Available: <strong>${r.PowerAvailable} Watts</strong>`;
+        document.getElementById('statEnc').innerHTML =
+          `Enclosure: <strong>${r.Enclosure}</strong>`;
+        document.getElementById('statStatus').innerHTML =
+          `Status: <strong class="status-ok">Ready</strong>`;
+      } catch(e) {
+        console.error("Preview error:", e);
+      }
+    }, 300);
+  }
+
+  async function doRelease() {
+    const btn = document.getElementById('btnRelease');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Generating...';
+    document.getElementById('statStatus').innerHTML =
+      `Status: <strong class="status-ok">Running DriveWorks pipeline...</strong>`;
+
+    const data = getFormData();
+    try {
+      const resp = await fetch('/release', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+      const r = await resp.json();
+
+      if (r.status === 'success') {
+        document.getElementById('statStatus').innerHTML =
+          `Status: <strong class="status-ok">✓ Generated: ${r.CPN}</strong>`;
+        alert(`✅ Success!\n\nCPN: ${r.CPN}\n\nOutputs saved to N:\\AI Driveworks Output\n` +
+              Object.entries(r.outputs).map(([k,v]) => `${k}: ${v}`).join('\n'));
+      } else {
+        document.getElementById('statStatus').innerHTML =
+          `Status: <strong class="status-err">Error: ${r.detail}</strong>`;
+      }
+    } catch(e) {
+      document.getElementById('statStatus').innerHTML =
+        `Status: <strong class="status-err">Connection error — is server running?</strong>`;
+      console.error(e);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'RELEASE';
+    }
+  }
+
+  function doCancel() {
+    if (confirm('Cancel current configuration?')) {
+      // Reset form to defaults
+      document.getElementById('unitWidth').value  = 36;
+      document.getElementById('unitHeight').value = 36;
+      document.querySelector('input[name="dimming"][value=""]').checked = true;
+      document.querySelectorAll('input[type="checkbox"]').forEach(c => c.checked = false);
+      updatePreview();
+    }
+  }
+
+  // Initial preview on load
+  window.addEventListener('load', updatePreview);
+</script>
+</body>
+</html>
