@@ -342,16 +342,14 @@ def calculate_led_base_length(top, bottom, left, right) -> float:
 # RAD4 HARD CAP = 74 segments  (confirmed in JS3 Chassis logic)
 # =============================================================================
 
-RAD4_MAX_SEGMENTS = 74
-
 def calculate_cuttable_segments(base_length_mm: float, segment_length_mm: float) -> tuple[int, int]:
     """
-    Returns (raw_segments, final_segments_after_cap).
+    Returns (raw_segments, final_segments).
     Replicates: LEDCuttableSegmentsEnc and LEDCuttableSegmentsFinal.
+    Note: Previously had a hallucinated 74 segment cap. DriveWorks has no physical cap on segments.
     """
     raw = math.ceil(base_length_mm / segment_length_mm)
-    final = min(raw, RAD4_MAX_SEGMENTS)
-    return raw, final
+    return raw, raw
 
 
 # =============================================================================
@@ -566,13 +564,49 @@ def calculate_driver_enclosure_pn(inp: RAD4Inputs, power_available: int) -> str:
 # For RAD4 (MW driver), max segments per strip ≈ 74 (the hard cap is also the max for 1 strip)
 # =============================================================================
 
-def calculate_led_strips(final_segments: int, driver_type: str) -> int:
-    """Returns number of LED strips required."""
-    # For RAD4 the 74-segment cap means we never exceed 1 strip at standard sizes
-    # but the formula is preserved for correctness
-    if final_segments <= RAD4_MAX_SEGMENTS:
-        return 1
-    return math.ceil(final_segments / RAD4_MAX_SEGMENTS)
+def calculate_led_strips(final_segments: int, driver_type: str, watts_per_meter: float, segment_length_mm: float) -> int:
+    """Returns number of LED strips required based on driver limits from DriveWorks XML."""
+    if final_segments <= 0:
+        return 0
+        
+    def max_seg(w: float) -> int:
+        return math.floor(((w / watts_per_meter) * 1000.0) / segment_length_mm)
+        
+    if driver_type == "ERP":
+        max_erp = max_seg(96)
+        return math.ceil(final_segments / max_erp)
+    elif driver_type == "Smart":  # Triac
+        max_60 = max_seg(60)
+        max_96 = max_seg(96)
+        if final_segments <= max_60:
+            return 1
+        elif final_segments <= max_96:
+            return 1
+        elif final_segments <= 2 * max_60:
+            return 2
+        elif final_segments <= 2 * max_96:
+            return 2
+        else:
+            return math.ceil(final_segments / max_96)
+    else:  # Letaron (standard)
+        max_75 = max_seg(75)
+        max_100 = max_seg(100)
+        max_150 = max_seg(150)
+        max_200 = max_seg(200)
+        max_225 = max_seg(225)
+        max_300 = max_seg(300)
+        if final_segments <= max_75:
+            return 1
+        elif final_segments <= max_100:
+            return 1
+        elif final_segments <= max_150:
+            return 2
+        elif final_segments <= max_200:
+            return 2
+        elif final_segments <= max_225:
+            return 3
+        else:
+            return math.ceil(final_segments / max_300)
 
 
 # =============================================================================
@@ -778,31 +812,35 @@ def run(inp: RAD4Inputs) -> RAD4Result:
     # 7. Physical LED length (mm)
     r.LEDmmLength = r.LEDCuttableSegmentsFinal * r.LEDSegmentLength
 
-    # 8. Strips required
-    r.LEDStripsRequiredEnc = calculate_led_strips(r.LEDCuttableSegmentsFinal, "MW")
+    # 8. Watts per meter
+    r.WattsPerMeter = calculate_watts_per_meter(inp)
 
-    # 9. Cut length per strip (inches)
+    # 9. Driver Type (needed for strips calculation)
+    r.DriverType = calculate_driver_type(inp)
+
+    # 10. Strips required
+    r.LEDStripsRequiredEnc = calculate_led_strips(
+        r.LEDCuttableSegmentsFinal, r.DriverType, r.WattsPerMeter, r.LEDSegmentLength
+    )
+
+    # 11. Cut length per strip (inches)
     r.LEDCutLengthIn = calculate_led_cut_length(
         r.LEDCuttableSegmentsFinal, r.LEDStripsRequiredEnc, r.LEDSegmentLength
     )
 
-    # 10. Watts per meter
-    r.WattsPerMeter = calculate_watts_per_meter(inp)
-
-    # 11. Power
+    # 12. Power
     r.PowerRequirement, r.WattageRequirement = calculate_power(
         r.LEDCuttableSegmentsFinal, r.LEDSegmentLength, r.WattsPerMeter,
         r.LEDBaseLengthEnc
     )
 
-    # 12. Driver
-    r.DriverType = calculate_driver_type(inp)
+    # 13. Driver Wattage + Qty (depends on WattageRequirement)
     r.DriverWattage, r.DriverQty = calculate_driver(r.DriverType, r.WattageRequirement)
 
-    # 13. Driver enclosure PN (uses PowerAvailable = DriverWattage)
+    # 14. Driver enclosure PN (uses PowerAvailable = DriverWattage)
     r.DriverEnclosurePN = calculate_driver_enclosure_pn(inp, r.DriverWattage)
 
-    # 14. LED PN + harness
+    # 15. LED PN + harness
     r.LEDPN            = calculate_led_pn(inp)
     r.LED1HarnessConfig = calculate_led_harness_config(1, r.DriverType)
 

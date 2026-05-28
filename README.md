@@ -1,65 +1,56 @@
-# DriveWorks Architecture Manifest
+# Programmatic RAD4 SolidWorks Configurator
+### Standalone Mirror Configurator bypassing DriveWorks
 
-This manifest outlines the current and proposed state of the DriveWorks ecosystem.
+This repository contains the complete implementation of the standalone RAD4 mirror configurator. It replaces the DriveWorks project pipeline with a direct Python-driven backend that calculates mirror properties and uses the SolidWorks COM API to generate and save production models, drawing PDFs, and Excel BOM files.
 
-## 1. Project Index & Analysis
+---
 
-| Project Name | Core Purpose | Input Requirements | Primary Outputs |
-|---|---|---|---|
-| **JS3 (Parent)** | Master configurator for the JS3 ecosystem. Parses Customer Part Numbers (CPNs) to resolve the mirror type and options. | User CPN string, Options (Lighting, Voltage) | `JS3_Assembly` model, `LegacyConfigured` document, triggers for child projects |
-| **JS3 Chassis** | Handles the structural and electrical configuration of the chassis. Computes LED wattage, segment lengths, and driver sizing. | `From_Parent_*` variables (MirrorType, Width, Height, Lighting, Voltage) | `JS3_CHASSIS_BOM` document, Chassis SolidWorks models |
-| **JS3 Mirror** | Configures the front-facing glass and frame elements. | `From_Parent_*` variables (MirrorType, Width, Height, Frost options) | Glass models, `INT3_M_BOM_Generic`, `FUS3_M_BOM_Generic` |
-| **Gen4** | Next-generation master configurator logic. | Gen4 CPN and component specs | `ExportToGen4ModelsTable`, `ExportToGen4Table` |
-| **Gen4 Mirror** | Gen4 mirror specific configurator. | Gen4 Parent inputs | `INT4_Mirror_BOM`, `ARI4_Mirror_BOM`, etc. |
-| **RAD3** | Specific model logic template/base for RAD3/RAD4. | Specifications | `RAD3_M_BOM`, `RAD4_M_BOM`, `JS Configured` |
-| **Radiance** | Radiance specific standalone configuration. | Form Controls | `BOM`, `Rad_3D_File` |
-| **Spark** | Spark model configurator. | Form Controls | `Spark Configured`, `Models` |
+## 1. Directory Structure
 
-## 2. Interaction Map
+*   **`configurator/`**: Main application folder.
+    *   `rad4_engine.py`: Replicates DriveWorks variable definitions, formulas, and math (BOM generation, LED pitch, segment count, wattage/driver selection, CPN parsing).
+    *   `sw_api.py`: SolidWorks COM integration. Copies standard templates, updates custom scaled profiles (`72239` structural frame, `64792` diffuser), and customizes/replaces LED sub-assembly and part references.
+    *   `server.py`: FastAPI server exposing `/release` (run full SW pipeline), `/preview` (calculate engine values instantly), and `/status` endpoints.
+    *   `ui/`: Vanilla HTML/JS frontend that replicates the DriveWorks form fields (sizes, finishes, lighting, and dimming options).
+*   **`docs/`**: Project documentation, implementation plans, and handovers.
+    *   `01_implementation_plan.md`: Initial architecture plan.
+    *   `02_v2_architecture_audit.md`: Deep-dive audit of original DriveWorks project.
+    *   `03_RAD4_independent_plan.md`: Strategy for isolating RAD4 from other styles.
+    *   `04_RAD4_full_logic_extraction.md`: Full extraction of variables and constraints.
+    *   `05_agent_handover.md`: Handover guide for developers/AI agents.
+*   **`scripts/`**: Historical extraction and unpacking utilities.
+*   **`analysis/`**: Analytical spreadsheets and structural logs.
 
-```mermaid
-graph TD
-    A[JS3 Parent Project] -->|Passes 'From_Parent_*'| B(JS3 Chassis Child)
-    A -->|Passes 'From_Parent_*'| C(JS3 Mirror Child)
-    
-    D[Gen4 Parent Project] -->|Passes config| E(Gen4 Mirror Child)
-    
-    F[Shared Group] --> A
-    F --> B
-    F --> C
-    F --> D
-    F --> E
-    
-    B --> G[BOMs & Driver Sizing]
-    C --> H[Glass & Frame Models]
+---
+
+## 2. Getting Started
+
+### Prerequisites
+*   Windows OS (tested on Windows 10/11)
+*   Python 3.9+
+*   SolidWorks 2021 (with COM interface active)
+*   Access to the engineering vault: `C:\EM Engineering Vault\`
+
+### Installation
+Clone the repository and install the dependencies:
+```bash
+pip install -r configurator/requirements.txt
 ```
+*Note: Requirements include `fastapi`, `uvicorn`, `pywin32`, `openpyxl`.*
 
-## 3. Logic Extraction (Top 5 Complex Projects)
+### Running the Configurator
+1.  Start the FastAPI backend:
+    ```bash
+    python configurator/server.py
+    ```
+2.  Open the web UI by launching `configurator/ui/index.html` in your web browser.
+3.  Fill in the mirror specifications and click the green **Release** button to trigger programmatic model generation in SolidWorks.
 
-1. **JS3 Parent**: Uses nested `Find()` and `If()` functions on `CPNInputReturn` to set `MirrorType2`. Values are passed down using `From_Parent_` constant mapping.
-2. **JS3 Chassis**: Calculates `LEDSegmentLength` (50mm vs 55.5mm). Computes total segments and applies caps based on Driver Types (e.g., Ava=99, LSE=89, HO=109, RAD4=74). Uses `Ceiling()` to determine required `DriverQty`.
-3. **JS3 Mirror**: Handles complex dimensional math for Frost and TV cutouts. Defines limits with constraint variables (e.g., `_Error_Constraint_Bevel`).
-4. **Gen4 Parent**: Generates configuration strings (`_Config_*`) for dynamic SolidWorks model swapping. 
-5. **RAD3**: Acts as a hybrid base, generating documents for multiple RAD models (`RAD3_M_BOM`, `RAD4_M_BOM`).
+---
 
-## 4. Proposed Folder Structure
+## 3. Core Features
 
-```
-N:\Driveworks
-├── Group_Data/                  (Shared .drivegroup, ODBC, Macros)
-├── Products_JS3/                (JS3 Ecosystem)
-│   ├── Parent/                  (JS3.driveprojx)
-│   ├── Chassis/                 (JS3 Chassis.driveprojx)
-│   ├── Mirror/                  (JS3 Mirror.driveprojx)
-│   └── Testing/
-├── Products_Gen4/               (Gen4 Ecosystem)
-│   ├── Parent/
-│   ├── Mirror/
-├── Products_Standalone/         (Self-contained models)
-│   ├── Radiance/
-│   ├── Round-Mirrors/
-│   ├── Spark/
-│   └── RAD3/
-├── Reference/                   (Excel Logic, Specifications, Scripts)
-└── Legacy_Archive/              (Old tests, Carlos Test, JS, TestProject95)
-```
+*   **Custom Size Support**: Automatically matches standard templates, copies horizontal/vertical aluminum extrusions and diffusers, scales their sizes to custom dimensions (e.g. `36.22`), and updates assembly mate coordinates.
+*   **LED Sizing Logic**: Computes exact LED strip segments (uncapped, matching DriveWorks mathematical perimeter) and generates custom LED parts (`RAD3-LED-*.SLDPRT`) and assemblies (`8218x-RAD3-*.SLDASM`) sized to the frame.
+*   **Dynamic Title Blocks**: Injects custom properties (lumen counts, wattage, voltage, CPN, and finish names) directly into drawings and sheets.
+*   **BOM Exporting**: Generates production-ready Bill of Materials exported to Excel files in `N:\AI Driveworks Output\`.
