@@ -1,0 +1,222 @@
+[
+    {
+        "Path": "N:\\Driveworks\\Projects\\805XX-TEST\\805XX-TEST.driveprojx",
+        "Name": "805XX-TEST",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": []
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\Carlos Test\\Carlos Test.driveprojx",
+        "Name": "Carlos Test",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": []
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\Gen4\\Gen4.driveprojx",
+        "Name": "Gen4",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "ExportToGen4ModelsTable",
+            "ExportToGen4Table"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\Gen4 Mirror\\Gen4 Mirror.driveprojx",
+        "Name": "Gen4 Mirror",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "INT4_Mirror_BOM",
+            "ARI4_Mirror_BOM",
+            "BEL4_Mirror_BOM",
+            "EYL4_Mirror_BOM",
+            "FUS4_Mirror_BOM",
+            "NOVV4_Mirror_BOM",
+            "OPA4_Mirror_BOM",
+            "SER4_Mirror_BOM",
+            "SIL4_Mirror_BOM"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\JS\\JS.driveprojx",
+        "Name": "JS",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "ConfiguredModels",
+            "RAD2P_Generic_BOM",
+            "Test RAD2",
+            "JS Configured",
+            "Emails",
+            "ModelComplete"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\JS3\\JS3.driveprojx",
+        "Name": "JS3",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "CompletedConfiguration",
+            "SendEmailAfterModelGeneration",
+            "LegacyConfigured",
+            "Preview",
+            "SimpleModel",
+            "ExportToJS3ConfiguredModelsTable",
+            "JS3_Assembly",
+            "test"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\JS3\\ElementTest\\ElementTest.driveprojx",
+        "Name": "ElementTest",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "ExportDate",
+            "ExportGroupDate",
+            "TestBOM",
+            "LoftBOM"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\JS3 Chassis\\JS3 Chassis.driveprojx",
+        "Name": "JS3 Chassis",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "JS3_CHASSIS_BOM"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\JS3 Mirror\\JS3 Mirror.driveprojx",
+        "Name": "JS3 Mirror",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "INT3_M_BOM_Generic",
+            "FUS3_M_BOM_Generic",
+            "ARI3_M_BOM_Generic",
+            "BEL3_M_BOM_Generic",
+            "TRO3_M_BOM_Generic"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\RAD3\\RAD3.driveprojx",
+        "Name": "RAD3",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "ConfiguredModels",
+            "RAD3_M_BOM",
+            "Test RAD3",
+            "JS Configured",
+            "Emails",
+            "ModelComplete",
+            "RAD3_BOM",
+            "RAD4_M_BOM"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\Radiance\\Radiance.driveprojx",
+        "Name": "Radiance",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "BOM",
+            "Rad_3D_File",
+            "TestSendRadFilesToTable"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\Round-Mirrors\\Round-Mirrors.driveprojx",
+        "Name": "Round-Mirrors",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": []
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\Spark\\Spark.driveprojx",
+        "Name": "Spark",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "ConfiguredModels",
+            "Spark Configured",
+            "CompletionEmail",
+            "SendEmail",
+            "Models",
+            "TestExportToSimpleTable"
+        ]
+    },
+    {
+        "Path": "N:\\Driveworks\\Projects\\TestProject95\\TestProject95.driveprojx",
+        "Name": "TestProject95",
+        "VariableCount": 0,
+        "ConstantCount": 0,
+        "VariablesSample": [],
+        "ConstantsSample": [],
+        "FromParentConstants": [],
+        "ChildProjects": [],
+        "Documents": [
+            "Excel_File_Test_Release",
+            "Test_FUS3_OG_BOM",
+            "Test_FUS3_New_BOM"
+        ]
+    }
+]
