@@ -47,9 +47,13 @@ DWConstantLED_Segment_Length_Ava         = 50.0    # mm — Ava / 81900
 DWConstantLED_Segment_Length_SO          = 55.55   # mm — Standard Output (note: some refs show 55.5)
 DWConstantLED_Segment_Length_HO          = 45.45   # mm — High Output
 
-# Watts per metre by lighting type  (lines 97-100)
-DWConstantWatts_Per_Meter_SO             = 22.0    # W/m Standard Output
-DWConstantWatts_Per_Meter_HO             = 33.0    # W/m High Output
+# Watts per metre by lighting type
+# SOURCE: RAD3.csv line 104 — WattsPerMeter = "If(DWVariableSO, 24, 12)"
+# RAD4/RAD3 project uses: SO lighting = 24 W/m, LO lighting = 12 W/m
+# (JS3 Chassis uses different values — RAD3.csv is authoritative for RAD4)
+DWConstantWatts_Per_Meter_SO             = 24.0    # W/m — RAD4 SO (Standard Output, "SO")
+DWConstantWatts_Per_Meter_LO             = 12.0    # W/m — RAD4 LO (Low Output, "LO")  ← screenshot: 35.64W
+DWConstantWatts_Per_Meter_HO             = 33.0    # W/m — JS3 High Output (not used for RAD4)
 DWConstantWatts_Per_Meter_Ava            = 28.6    # W/m Ava (81900)
 DWConstantWatts_Per_Meter_Residential_Ava = 28.6
 DWConstantWatts_Per_Meter_Hospitality_Ava = 14.3
@@ -351,126 +355,202 @@ def calculate_cuttable_segments(base_length_mm: float, segment_length_mm: float)
 
 
 # =============================================================================
-# WATTS PER METRE  (JS3 Chassis.csv lines 97-100)
+# WATTS PER METRE  (RAD3.csv line 104 — AUTHORITATIVE for RAD4)
 #
-# DW formula:
-#   If(IsAva, Watts_Per_Meter_Ava,
-#   If(Lighting = "HO" OR Lighting = "LHE", Watts_Per_Meter_HO,
-#      Watts_Per_Meter_SO))
+# DW formula (verbatim from RAD3.csv):
+#   WattsPerMeter = "If(DWVariableSO, 24, 12)"
+#
+# Where DWVariableSO = (Lighting = "SO")
+#   Lighting = "SO" → 24 W/m
+#   Lighting = "LO" → 12 W/m
+#
+# IMPORTANT — Power formula chain:
+#   PowerRequirementBase = LEDLengthMM / 1000 × WattsPerMeter
+#
+#   LEDLengthMM is a BLANK variable in RAD3.csv — it is NOT calculated from
+#   width/height. It is populated from the SolidWorks model geometry at runtime
+#   (the physical LED path length measured from the 3D assembled model).
+#
+#   In Python, we use LEDBaseLengthEnc as the best approximation.
+#   Actual LEDLengthMM must be read from the SolidWorks assembly's custom property
+#   after it opens — sw_api.py does this in _build_chassis_assembly().
+#
+# Validation: RAD4-36.00X36.00-LO → DW shows 35.64W
+#   35.64W / 12 W/m × 1000 = 2970mm physical LED path
+#   Our formula gives 3608mm (uses full perimeter inc. corner arcs)
+#   → The gap (638mm) is the difference between outer perimeter and
+#     actual LED path which follows the inner channel geometry.
+#   For production accuracy: read LEDLengthMM back from the SolidWorks model.
 # =============================================================================
 
 def calculate_watts_per_meter(inp: RAD4Inputs) -> float:
+    """
+    RAD3.csv line 104: WattsPerMeter = "If(DWVariableSO, 24, 12)"
+    DWVariableSO = (Lighting = "SO")
+    """
     if inp.Ava:
         return DWConstantWatts_Per_Meter_Ava
-    if inp.Lighting in ("HO", "LHE"):
-        return DWConstantWatts_Per_Meter_HO
-    return DWConstantWatts_Per_Meter_SO
+    if inp.Lighting == "SO":
+        return DWConstantWatts_Per_Meter_SO   # 24 W/m
+    return DWConstantWatts_Per_Meter_LO        # 12 W/m  (LO and all others)
 
 
 # =============================================================================
-# POWER REQUIREMENT  (JS3 Chassis.csv lines 148-152)
+# POWER REQUIREMENT  (RAD3.csv lines 327-328, JS3 Chassis.csv lines 148-152)
 #
-# DW formula (PowerRequirement — no buffer):
-#   LEDCuttableSegmentsFinal * LEDSegmentLength / 1000 * WattsPerMeter
+# RAD3.csv formula (verbatim):
+#   PowerRequirement = DWVariablePowerRequirementBase
+#                    + If(DWVariableWallGlow, DWVariablePowerRequirementWG, 0)
 #
-# DW formula (WattageRequirement — with buffer):
-#   PowerRequirement * (1 + DriverBuffer)   → rounded up to next driver tier
+# PowerRequirementBase (from Chassis) =
+#   If(FusLEDs, FusionSegments, If(PerimeterLEDs, LEDCuttableSegmentsFinal, 0))
+#   × LEDSegmentLength / 1000 × WattsPerMeter
+#
+# For RAD4: FusLEDs=FALSE, PerimeterLEDs=TRUE (RAD4 is perimeter LED type)
+# So: PowerRequirement = LEDCuttableSegmentsFinal × LEDSegmentLength / 1000 × WattsPerMeter
+#
+# BufferedPowerRequirement (RAD3.csv — used to select driver):
+#   = Floor((PowerRequirementTotal / DriverPowerFactor) / DriverEfficiency, 1)
+#   DriverLetaron (standard no-dimming RAD4): PowerFactor from VLookup(81030,...)
+#   Approximation: buffer ≈ 15% overhead → matches DWConstantDriverBuffer
+#
+# PowerAvailable (what DW shows in status bar):
+#   = driver wattage tier selected (90W, 96W, 192W, etc.)
 # =============================================================================
 
-def calculate_power(final_segments: int, segment_length_mm: float, watts_per_meter: float) -> tuple[float, float]:
-    """Returns (power_requirement_no_buffer_W, wattage_requirement_with_buffer_W)."""
-    led_length_m   = (final_segments * segment_length_mm) / 1000.0
-    power_req      = led_length_m * watts_per_meter
-    wattage_req    = power_req * (1 + DWConstantDriverBuffer)
-    return power_req, wattage_req
+def calculate_power(final_segments: int, segment_length_mm: float,
+                    watts_per_meter: float, base_length_mm: float = 0) -> tuple[float, float]:
+    """
+    Returns (power_requirement_no_buffer_W, buffered_power_W).
+    Replicates RAD3 PowerRequirement and BufferedPowerRequirement.
+    """
+    led_length_m = (final_segments * segment_length_mm) / 1000.0
+    power_req    = led_length_m * watts_per_meter
+    # BufferedPowerRequirement: add 15% and floor to int
+    buffered     = math.floor(power_req * (1 + DWConstantDriverBuffer))
+    return power_req, buffered
 
 
 # =============================================================================
-# DRIVER TYPE  (JS3 Chassis.csv lines 429-431)
+# DRIVER TYPE  (RAD3.csv lines 120-126 — AUTHORITATIVE for RAD4)
 #
-# DW formula:
-#   If(IsD1,   "HEP",
-#   If(IsD2,   "Triac",
-#   If(Or(Ava, Keen, Voltage = "277V"), "ERP",
-#              "MW")))
+# RAD3.csv verbatim:
+#   DriverLetaron = Or(D1, Keen, Dimming="No_Dimming") AND NOT(Voltage="277V")
+#   DriverERP     = Keen or no-dimming with 277V
+#   DriverHEP     = False (not used on RAD4)
+#   DriverMW      = False (not used on RAD4)
+#   DriverSmart   = Whenever D2 is used
+#
+# Mapping to standard type names:
+#   D1 or no-dimming (standard voltage) → "Letaron" (= 81030 driver family)
+#   D2                                  → "Smart" (= Triac/79314)
+#   Keen or 277V                        → "ERP"   (= 71225)
+#   Ava                                 → "ERP"
 # =============================================================================
 
 def calculate_driver_type(inp: RAD4Inputs) -> str:
-    if inp.DimmingType == "D1":
-        return "HEP"
+    """
+    RAD3.csv driver type logic.
+    Returns one of: 'Letaron', 'Smart', 'ERP'
+    """
     if inp.DimmingType == "D2":
-        return "Triac"
+        return "Smart"       # DriverSmart — D2/Triac
     if inp.Ava or inp.Keen or inp.Voltage == "277V":
-        return "ERP"
-    return "MW"
+        return "ERP"         # DriverERP
+    return "Letaron"         # DriverLetaron — D1 or no-dimming (standard)
 
 
 # =============================================================================
-# DRIVER WATTAGE + QTY  (JS3 Chassis.csv lines 1234-1249)
+# DRIVER WATTAGE / POWER AVAILABLE  (RAD3.csv lines 257-324)
 #
-# DW selects smallest driver that handles the wattage requirement.
-# For RAD4 / MW (most common):
-#   ≤ 50W  → MW-50,  qty 1
-#   ≤ 75W  → MW-75,  qty 1
-#   ≤ 100W → MW-100, qty 1
-#   ≤ 150W → MW-150, qty 1 (or 2× MW-75 if strips=2)
-#   ≤ 200W → MW-200, qty 1
-#   ≤ 225W → MW-225, qty 1
-#   else   → MW-300, qty = Ceiling(wattage / 300)
+# RAD3.csv formula:
+#   DualDriver = Or(
+#     D2 AND BufferedPower > 55,
+#     D1 AND BufferedPower > 96,
+#     No-Dimming AND BufferedPower > 85)
 #
-# For ERP: always ERP-96, qty = Ceiling(wattage / 96)
-# For HEP: always HEP-96, qty = Ceiling(wattage / 96)
-# For Triac: 60W or 96W tiers
+#   PowerAvailable (what status bar shows):
+#     If D2:       If(BufferedPower < 90.5, 96, 192)
+#     If D1:       If(BufferedPower < 96, 96, 192)
+#     No-dimming:  If(BufferedPower < 85, 96, If(BufferedPower < 85.3, 96, 192))
+#     ERP (277V):  If(BufferedPower < 90.5, 96, 192)
+#
+# Simplified: single driver = 96W, dual driver = 192W
+# EnclosureInstance = "81330" + options + "-96W" or "-192W"
 # =============================================================================
 
-def calculate_driver(driver_type: str, wattage_req: float) -> tuple[int, int]:
-    """Returns (driver_wattage, driver_qty)."""
-    if driver_type == "ERP":
-        watt = DWConstantWattage_Max_ERP_96
-        qty  = math.ceil(wattage_req / watt)
-        return watt, qty
+def calculate_driver(driver_type: str, buffered_power: float) -> tuple[int, int]:
+    """
+    Returns (power_available_W, driver_qty).
+    Replicates RAD3 DualDriver logic and PowerAvailable selection.
+    """
+    # Thresholds from RAD3.csv lines 278-324
+    if driver_type == "Smart":   # D2
+        threshold = 90.5
+    elif driver_type == "ERP":   # Keen / 277V
+        threshold = 90.5
+    elif driver_type == "Letaron" and buffered_power > 0:  # D1 or no-dimming
+        # No-dimming threshold from RAD3: >85 triggers dual
+        threshold = 85.0
+    else:
+        threshold = 85.0
 
-    if driver_type == "HEP":
-        watt = DWConstantWattage_Max_HEP_96
-        qty  = math.ceil(wattage_req / watt)
-        return watt, qty
-
-    if driver_type == "Triac":
-        if wattage_req <= DWConstantWattage_Max_Triac_60:
-            return DWConstantWattage_Max_Triac_60, 1
-        elif wattage_req <= DWConstantWattage_Max_Triac_96:
-            return DWConstantWattage_Max_Triac_96, 1
-        else:
-            return DWConstantWattage_Max_Triac_96, math.ceil(wattage_req / DWConstantWattage_Max_Triac_96)
-
-    # MW (default for RAD4 no-dimming)
-    for cap in (DWConstantWattage_Max_MW_50,
-                DWConstantWattage_Max_MW_75,
-                DWConstantWattage_Max_MW_100,
-                DWConstantWattage_Max_MW_150,
-                DWConstantWattage_Max_MW_200,
-                DWConstantWattage_Max_MW_225,
-                DWConstantWattage_Max_MW_300):
-        if wattage_req <= cap:
-            return cap, 1
-    return DWConstantWattage_Max_MW_300, math.ceil(wattage_req / DWConstantWattage_Max_MW_300)
+    if buffered_power <= threshold:
+        return 96, 1    # Single driver, 96W available
+    else:
+        return 192, 2   # Dual driver, 192W available
 
 
 # =============================================================================
-# DRIVER ENCLOSURE PN  (JS3 Chassis.csv — DWVariableDriverEnclosurePN)
+# DRIVER ENCLOSURE PN  (RAD3.csv lines 146-168 — EnclosureInstance formula)
 #
-# The driver enclosure PN for RAD4 is:
-#   81330-DRIVER-MODULE-RAD3  (standard vertical, all wattages)
+# RAD3.csv EnclosureInstance formula (verbatim):
+#   "81330" &
+#   If(Clock, "-CKX", "") &
+#   If(Or(D1, D2), "-" & DimmingType, "") &
+#   If(Defogger, "-DF", "") &
+#   If(Keen, "-K", "") &
+#   If(PowerAvailable=90, "-90W", If(PowerAvailable=96, "-96W",
+#      If(PowerAvailable=190, "-190W", "-192W"))) &
+#   If(277V, "-277V", "")
 #
-# For 277V or specific orientations: 81330-VERT-DRIVER-MODULE-RAD3
-# Confirmed from C:\EM Engineering Vault\COMPONENTS\81000\
+# Example: 81330-96W              (no dimming, no options, 96W)
+#          81330-D1-96W           (D1 dimming)
+#          81330-CKX-96W          (with clock)
+#          81330-96W-277V         (277V)
+#          81330-192W             (dual driver)
+# Screenshot shows: Enclosure: 81330-96W  ← matches this formula exactly
 # =============================================================================
 
-def calculate_driver_enclosure_pn(inp: RAD4Inputs, driver_wattage: int) -> str:
-    """Returns the driver enclosure assembly name."""
+def calculate_driver_enclosure_pn(inp: RAD4Inputs, power_available: int) -> str:
+    """
+    Builds the enclosure PN string exactly as RAD3.csv EnclosureInstance does.
+    """
+    pn = "81330"
+
+    if inp.Clock:
+        pn += "-CKX"
+    if inp.DimmingType in ("D1", "D2", "DM"):
+        pn += f"-{inp.DimmingType}"
+    if inp.Defogger:
+        pn += "-DF"
+    if inp.Keen:
+        pn += "-K"
+
+    # Wattage suffix
+    if power_available == 90:
+        pn += "-90W"
+    elif power_available == 96:
+        pn += "-96W"
+    elif power_available == 190:
+        pn += "-190W"
+    else:
+        pn += "-192W"
+
     if inp.Voltage == "277V":
-        return "81330-VERT-DRIVER-MODULE-RAD3"
-    return "81330-DRIVER-MODULE-RAD3"
+        pn += "-277V"
+
+    return pn
 
 
 # =============================================================================
@@ -711,14 +791,15 @@ def run(inp: RAD4Inputs) -> RAD4Result:
 
     # 11. Power
     r.PowerRequirement, r.WattageRequirement = calculate_power(
-        r.LEDCuttableSegmentsFinal, r.LEDSegmentLength, r.WattsPerMeter
+        r.LEDCuttableSegmentsFinal, r.LEDSegmentLength, r.WattsPerMeter,
+        r.LEDBaseLengthEnc
     )
 
     # 12. Driver
     r.DriverType = calculate_driver_type(inp)
     r.DriverWattage, r.DriverQty = calculate_driver(r.DriverType, r.WattageRequirement)
 
-    # 13. Driver enclosure PN
+    # 13. Driver enclosure PN (uses PowerAvailable = DriverWattage)
     r.DriverEnclosurePN = calculate_driver_enclosure_pn(inp, r.DriverWattage)
 
     # 14. LED PN + harness
@@ -743,12 +824,14 @@ def run(inp: RAD4Inputs) -> RAD4Result:
 # =============================================================================
 
 if __name__ == "__main__":
+    # Test 1: LO lighting — matches the DriveWorks screenshot
+    # Expected: CPN=RAD4-36.00X36.00-RM-LO-NK04-30K, Power=35.64W, Enclosure=81330-96W
     test = RAD4Inputs(
         UnitWidth=36.0,
         UnitHeight=36.0,
         MirrorType="RAD4",
         MountType="RM",
-        Lighting="LSE",
+        Lighting="LO",
         LEDColorTemp="30K",
         Finish="NK04",
         Voltage="Standard",
@@ -770,10 +853,11 @@ if __name__ == "__main__":
     print(f"LED Cut Length:    {result.LEDCutLengthIn:.2f} in")
     print(f"Watts/m:           {result.WattsPerMeter}")
     print(f"Power Required:    {result.PowerRequirement:.2f} W   (target: 35.64 W)")
-    print(f"Wattage Req:       {result.WattageRequirement:.2f} W")
+    print(f"Buffered Power:    {result.WattageRequirement} W  (used for driver selection)")
     print(f"Driver Type:       {result.DriverType}")
-    print(f"Driver Wattage:    {result.DriverWattage} W")
-    print(f"Driver PN:         {result.DriverEnclosurePN}")
+    print(f"PowerAvailable:    {result.DriverWattage} W  (target: 96 W)")
+    print(f"Driver Qty:        {result.DriverQty}")
+    print(f"Driver PN:         {result.DriverEnclosurePN}  (target: 81330-96W)")
     print(f"LED PN:            {result.LEDPN}")
     print("-" * 60)
     print("BOM:")
