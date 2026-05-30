@@ -268,8 +268,18 @@ class SolidWorksAPI:
 
         
         # Replace mirror in chassis copy
-        ref_mirror_temp = str(mirror_dir / f"RAD4-{temp_w:.2f}X{temp_h:.2f}-M.SLDASM")
-        success = self.swApp.ReplaceReferencedDocument(str(out_chassis), ref_mirror_temp, str(out_mirror))
+        ref_mirror_temp = None
+        deps = self.swApp.GetDocumentDependencies2(str(out_chassis), True, True, False)
+        if deps:
+            for i in range(0, len(deps), 2):
+                dep_path = deps[i+1] if i+1 < len(deps) else ""
+                if dep_path and r"products\js3\mirrors\rad4" in dep_path.lower() and dep_path.lower().endswith("-m.sldasm"):
+                    ref_mirror_temp = dep_path
+                    break
+        if not ref_mirror_temp:
+            ref_mirror_temp = str(mirror_dir / f"RAD4-{temp_w:.2f}X{temp_h:.2f}-M.SLDASM")
+            
+        success = self.swApp.ReplaceReferencedDocument(str(out_chassis), str(ref_mirror_temp), str(out_mirror))
         log.info(f"ReplaceReferencedDocument (Chassis -> Mirror) replacing {ref_mirror_temp} with {out_mirror}: {success}")
 
         # Replace chassis in drawing copy (checking all possible template variant chassis names)
@@ -322,6 +332,68 @@ class SolidWorksAPI:
                     log.info(f"Updated mirror dimension {name} to {val / 0.0254:.4f} in")
                 else:
                     log.warning(f"Mirror dimension {name} not found in assembly.")
+            
+            # Traverse and configure/suppress option-specific components in mirror
+            components = swMirror.GetComponents(True)
+            if components:
+                button_needed = inp.Ava or inp.Keen or inp.Vive
+                for comp in components:
+                    c_path = comp.GetPathName.lower()
+                    c_name = comp.Name2
+                    
+                    if "js3-ava-keen-vive-1-button-assembly" in c_path:
+                        if not button_needed:
+                            comp.SetSuppression2(0)  # 0 = Suppressed
+                            log.info(f"Suppressed button assembly component: {c_name}")
+                        else:
+                            comp.SetSuppression2(2)  # 2 = FullyResolved
+                            # Determine configuration
+                            button_config = None
+                            if inp.Ava:
+                                button_config = f"64167-{inp.DimmingType}"
+                            elif inp.Keen:
+                                if result.DriverQty < 2:
+                                    button_config = f"61857-{inp.DimmingType}"
+                                else:
+                                    button_config = f"61857-{inp.DimmingType}-2"
+                            elif inp.Vive:
+                                button_config = "83047"
+                                
+                            if button_config:
+                                comp.ReferencedConfiguration = button_config
+                                log.info(f"Resolved button assembly and set configuration to: {button_config}")
+                                
+                    elif "58821-mirror-harness" in c_path:
+                        if inp.Keen and result.DriverQty < 2:
+                            comp.SetSuppression2(2)
+                            log.info(f"Resolved Keen 1-Driver harness: {c_name}")
+                        else:
+                            comp.SetSuppression2(0)
+                            log.info(f"Suppressed Keen 1-Driver harness: {c_name}")
+                            
+                    elif "64090-ava-mirror-harness" in c_path:
+                        if inp.Ava or (inp.Keen and result.DriverQty >= 2):
+                            comp.SetSuppression2(2)
+                            log.info(f"Resolved Ava/Keen 2-Driver harness: {c_name}")
+                        else:
+                            comp.SetSuppression2(0)
+                            log.info(f"Suppressed Ava/Keen 2-Driver harness: {c_name}")
+                            
+                    elif "64297-m-cable-harness-vive-1" in c_path:
+                        if inp.Vive:
+                            comp.SetSuppression2(2)
+                            log.info(f"Resolved Vive harness: {c_name}")
+                        else:
+                            comp.SetSuppression2(0)
+                            log.info(f"Suppressed Vive harness: {c_name}")
+                            
+                    elif "64091-ava-mirror-harness-df" in c_path:
+                        if inp.Defogger:
+                            comp.SetSuppression2(2)
+                            log.info(f"Resolved Defogger harness: {c_name}")
+                        else:
+                            comp.SetSuppression2(0)
+                            log.info(f"Suppressed Defogger harness: {c_name}")
 
             swMirror.ForceRebuild3(False)
             swMirror.Save3(0, errors, warnings)
@@ -429,6 +501,12 @@ class SolidWorksAPI:
             self._set_custom_properties(swDrawing, drawing_props)
             log.info("Drawing custom properties set successfully.")
 
+            # Run Python feature traversal to update Sheet 2 notes (mirror assembly and powerbox assembly)
+            try:
+                self._update_drawing_notes_via_python(swDrawing, cpn, result.DriverWattage)
+            except Exception as e:
+                log.error(f"Failed to update Sheet 2 notes via Python traversal: {e}")
+
             # Rebuild twice to ensure all properties propagate to title blocks
             swDrawing.ForceRebuild3(False)
             swDrawing.ForceRebuild3(False)
@@ -464,6 +542,7 @@ class SolidWorksAPI:
         """
         comp_72_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "72000"
         comp_64_dir = Path(vault) / "COMPONENTS" / "64000"
+        comp_64_js3_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "64000"
 
         is_custom_w = abs(width - temp_w) > 0.001
         is_custom_h = abs(height - temp_h) > 0.001
@@ -518,8 +597,17 @@ class SolidWorksAPI:
             out_alu_w = comp_72_dir / f"72239-{width:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
             copy_and_update_part(temp_alu_w, out_alu_w, width, "D1@Extrusion")
 
-            temp_dif_w = comp_64_dir / f"64792-{temp_w:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-            out_dif_w = comp_64_dir / f"64792-{width:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            # Check both standard and JS3 locations
+            temp_dif_w_standard = comp_64_dir / f"64792-{temp_w:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            temp_dif_w_js3 = comp_64_js3_dir / f"64792-{temp_w:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            
+            if temp_dif_w_js3.exists():
+                temp_dif_w = temp_dif_w_js3
+                out_dif_w = comp_64_js3_dir / f"64792-{width:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            else:
+                temp_dif_w = temp_dif_w_standard
+                out_dif_w = comp_64_dir / f"64792-{width:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+
             copy_and_update_part(temp_dif_w, out_dif_w, width, "D1@Boss-Extrude1")
 
             temp_asm_w = comp_72_dir / f"72239-XXX-{temp_w:.2f}.SLDASM"
@@ -534,7 +622,8 @@ class SolidWorksAPI:
                     except Exception as e:
                         log.warning(f"Could not make existing file writable {out_asm_w}: {e}")
                 self.swApp.ReplaceReferencedDocument(str(out_asm_w), str(temp_alu_w), str(out_alu_w))
-                self.swApp.ReplaceReferencedDocument(str(out_asm_w), str(temp_dif_w), str(out_dif_w))
+                self.swApp.ReplaceReferencedDocument(str(out_asm_w), str(temp_dif_w_js3), str(out_dif_w))
+                self.swApp.ReplaceReferencedDocument(str(out_asm_w), str(temp_dif_w_standard), str(out_dif_w))
                 
                 errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
                 warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
@@ -556,8 +645,17 @@ class SolidWorksAPI:
             out_alu_h = comp_72_dir / f"72239-{height:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
             copy_and_update_part(temp_alu_h, out_alu_h, height, "D1@Extrusion")
 
-            temp_dif_h = comp_64_dir / f"64792-{temp_h:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-            out_dif_h = comp_64_dir / f"64792-{height:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            # Check both standard and JS3 locations
+            temp_dif_h_standard = comp_64_dir / f"64792-{temp_h:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            temp_dif_h_js3 = comp_64_js3_dir / f"64792-{temp_h:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            
+            if temp_dif_h_js3.exists():
+                temp_dif_h = temp_dif_h_js3
+                out_dif_h = comp_64_js3_dir / f"64792-{height:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            else:
+                temp_dif_h = temp_dif_h_standard
+                out_dif_h = comp_64_dir / f"64792-{height:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+
             copy_and_update_part(temp_dif_h, out_dif_h, height, "D1@Boss-Extrude1")
 
             temp_asm_hn = comp_72_dir / f"72239-XXX-{temp_h:.2f}-N.SLDASM"
@@ -572,7 +670,8 @@ class SolidWorksAPI:
                     except Exception as e:
                         log.warning(f"Could not make existing file writable {out_asm_hn}: {e}")
                 self.swApp.ReplaceReferencedDocument(str(out_asm_hn), str(temp_alu_hn), str(out_alu_hn))
-                self.swApp.ReplaceReferencedDocument(str(out_asm_hn), str(temp_dif_h), str(out_dif_h))
+                self.swApp.ReplaceReferencedDocument(str(out_asm_hn), str(temp_dif_h_js3), str(out_dif_h))
+                self.swApp.ReplaceReferencedDocument(str(out_asm_hn), str(temp_dif_h_standard), str(out_dif_h))
                 
                 errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
                 warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
@@ -594,7 +693,8 @@ class SolidWorksAPI:
                     except Exception as e:
                         log.warning(f"Could not make existing file writable {out_asm_h}: {e}")
                 self.swApp.ReplaceReferencedDocument(str(out_asm_h), str(temp_alu_h), str(out_alu_h))
-                self.swApp.ReplaceReferencedDocument(str(out_asm_h), str(temp_dif_h), str(out_dif_h))
+                self.swApp.ReplaceReferencedDocument(str(out_asm_h), str(temp_dif_h_js3), str(out_dif_h))
+                self.swApp.ReplaceReferencedDocument(str(out_asm_h), str(temp_dif_h_standard), str(out_dif_h))
                 
                 errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
                 warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
@@ -613,17 +713,58 @@ class SolidWorksAPI:
     def _export_bom(self, result: RAD4Result, output_xlsx_path: str):
         try:
             import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment
+            import datetime
+            from openpyxl.styles import Font, PatternFill
         except ImportError:
-            log.warning("openpyxl not installed — skipping Excel BOM.")
+            log.warning("openpyxl or datetime not installed — skipping Excel BOM.")
             return
 
+        vault = DWConstantVault
+        bom_dir = Path(vault) / "Products" / "JS3" / "Mirrors" / "RAD4"
+        vault_bom_path = bom_dir / f"{result.CPN}-M-BOM.xlsx"
+
+        # Search for a template in the vault
+        bom_templates = list(bom_dir.glob("RAD4-*-M-BOM.xlsx"))
+        template_copied = False
+
+        if bom_templates:
+            template_bom = bom_templates[0]
+            log.info(f"Using vault BOM template: {template_bom}")
+            try:
+                # Copy to both locations
+                _copy_file_writable(template_bom, Path(output_xlsx_path))
+                _copy_file_writable(template_bom, vault_bom_path)
+                template_copied = True
+            except Exception as e:
+                log.warning(f"Could not copy vault BOM template: {e}")
+
+        if template_copied:
+            try:
+                # Open, update cells, and save to both locations
+                for path_to_save in [output_xlsx_path, str(vault_bom_path)]:
+                    wb = openpyxl.load_workbook(path_to_save)
+                    ws = wb.active
+                    
+                    # Update cells based on defined named ranges / cell addresses
+                    ws["D1"] = f"{result.CPN}-M"
+                    ws["D2"] = datetime.datetime.now().strftime("%m/%d/%Y")
+                    ws["D6"] = result.DriverEnclosurePN
+                    ws["D7"] = "AI"
+                    ws["D8"] = "AI"
+                    ws["D9"] = datetime.datetime.now().strftime("%m/%d/%Y")
+                    
+                    wb.save(path_to_save)
+                log.info(f"BOM exported with template format to {output_xlsx_path} and {vault_bom_path}")
+                return
+            except Exception as e:
+                log.error(f"Error customizing template BOM: {e}. Falling back to basic BOM generation.")
+
+        # Fallback to basic BOM generation from scratch
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "BOM"
 
         header_fill = PatternFill("solid", fgColor="1F3864")
-        header_font = Font(color="FFFFFF", bold=True)
         
         ws.cell(row=1, column=1, value=f"BOM — {result.CPN}")
         ws.merge_cells("A1:C1")
@@ -647,8 +788,39 @@ class SolidWorksAPI:
         ws.column_dimensions["B"].width = 30
         ws.column_dimensions["C"].width = 40
 
+        # Save to both target output and vault
         wb.save(output_xlsx_path)
-        log.info(f"BOM exported to: {output_xlsx_path}")
+        try:
+            shutil.copyfile(output_xlsx_path, str(vault_bom_path))
+            os.chmod(str(vault_bom_path), 0o666)
+        except Exception as e:
+            log.warning(f"Could not copy fallback BOM to vault: {e}")
+            
+        log.info(f"BOM exported (fallback) to: {output_xlsx_path}")
+
+    def _update_drawing_notes_via_python(self, swDrawing, cpn: str, driver_wattage: float):
+        powerbox = "81330-96W" if driver_wattage <= 96 else "81330-192W"
+        log.info(f"Updating Sheet 2 notes in SolidWorks via design tree feature traversal (wattage: {driver_wattage}W)")
+        
+        # Traverse design tree features
+        feat = swDrawing.FirstFeature
+        while feat:
+            if feat.GetTypeName2 == "DrSheet" and feat.Name.lower() == "sheet2":
+                sf = feat.GetFirstSubFeature
+                while sf:
+                    if sf.GetTypeName2 in ["AbsoluteView", "UnfoldedView", "SectionAssemView"]:
+                        view = sf.GetSpecificFeature2
+                        if view:
+                            note = view.GetFirstNote
+                            while note:
+                                text = note.GetText
+                                if text and "mirror assembly:" in text.lower():
+                                    new_text = f"MIRROR ASSEMBLY:  {cpn}-M\nPOWERBOX ASSEMBLY: {powerbox}"
+                                    note.SetText(new_text)
+                                    log.info(f"Successfully updated drawing note in view '{sf.Name}': {new_text}")
+                                note = note.GetNext
+                    sf = sf.GetNextSubFeature
+            feat = feat.GetNextFeature
 
     def close(self):
         pass
