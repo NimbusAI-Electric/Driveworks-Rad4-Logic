@@ -797,16 +797,6 @@ class SolidWorksAPI:
             wb.Close(False)
             excel.Quit()
             log.info(f"Successfully exported BOM PDF to: {abs_pdf}")
-            
-            # Copy BOM PDF to Vault mirror folder
-            try:
-                bom_dir = Path(DWConstantVault) / "Products" / "JS3" / "Mirrors" / "RAD4"
-                vault_pdf_path = bom_dir / os.path.basename(abs_pdf)
-                shutil.copyfile(abs_pdf, str(vault_pdf_path))
-                os.chmod(str(vault_pdf_path), 0o666)
-                log.info(f"Successfully copied BOM PDF to vault: {vault_pdf_path}")
-            except Exception as ec:
-                log.warning(f"Could not copy BOM PDF to vault: {ec}")
         except Exception as e:
             log.error(f"Failed to export BOM PDF via Excel COM API: {e}")
 
