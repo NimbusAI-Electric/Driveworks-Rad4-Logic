@@ -273,9 +273,11 @@ class SolidWorksAPI:
         if deps:
             for i in range(0, len(deps), 2):
                 dep_path = deps[i+1] if i+1 < len(deps) else ""
-                if dep_path and r"products\js3\mirrors\rad4" in dep_path.lower() and dep_path.lower().endswith("-m.sldasm"):
-                    ref_mirror_temp = dep_path
-                    break
+                if dep_path:
+                    filename = os.path.basename(dep_path).lower()
+                    if filename.startswith("rad4-") and filename.endswith("-m.sldasm"):
+                        ref_mirror_temp = dep_path
+                        break
         if not ref_mirror_temp:
             ref_mirror_temp = str(mirror_dir / f"RAD4-{temp_w:.2f}X{temp_h:.2f}-M.SLDASM")
             
@@ -333,18 +335,18 @@ class SolidWorksAPI:
                 else:
                     log.warning(f"Mirror dimension {name} not found in assembly.")
             
-            # Traverse and configure/suppress option-specific components in mirror
+            # Traverse and configure/suppress/delete option-specific components in mirror
             components = swMirror.GetComponents(True)
             if components:
                 button_needed = inp.Ava or inp.Keen or inp.Vive
+                to_delete = []
                 for comp in components:
                     c_path = comp.GetPathName.lower()
                     c_name = comp.Name2
                     
                     if "js3-ava-keen-vive-1-button-assembly" in c_path:
                         if not button_needed:
-                            comp.SetSuppression2(0)  # 0 = Suppressed
-                            log.info(f"Suppressed button assembly component: {c_name}")
+                            to_delete.append(comp)
                         else:
                             comp.SetSuppression2(2)  # 2 = FullyResolved
                             # Determine configuration
@@ -362,38 +364,13 @@ class SolidWorksAPI:
                             if button_config:
                                 comp.ReferencedConfiguration = button_config
                                 log.info(f"Resolved button assembly and set configuration to: {button_config}")
-                                
-                    elif "58821-mirror-harness" in c_path:
-                        if inp.Keen and result.DriverQty < 2:
-                            comp.SetSuppression2(2)
-                            log.info(f"Resolved Keen 1-Driver harness: {c_name}")
-                        else:
-                            comp.SetSuppression2(0)
-                            log.info(f"Suppressed Keen 1-Driver harness: {c_name}")
-                            
-                    elif "64090-ava-mirror-harness" in c_path:
-                        if inp.Ava or (inp.Keen and result.DriverQty >= 2):
-                            comp.SetSuppression2(2)
-                            log.info(f"Resolved Ava/Keen 2-Driver harness: {c_name}")
-                        else:
-                            comp.SetSuppression2(0)
-                            log.info(f"Suppressed Ava/Keen 2-Driver harness: {c_name}")
-                            
-                    elif "64297-m-cable-harness-vive-1" in c_path:
-                        if inp.Vive:
-                            comp.SetSuppression2(2)
-                            log.info(f"Resolved Vive harness: {c_name}")
-                        else:
-                            comp.SetSuppression2(0)
-                            log.info(f"Suppressed Vive harness: {c_name}")
-                            
-                    elif "64091-ava-mirror-harness-df" in c_path:
-                        if inp.Defogger:
-                            comp.SetSuppression2(2)
-                            log.info(f"Resolved Defogger harness: {c_name}")
-                        else:
-                            comp.SetSuppression2(0)
-                            log.info(f"Suppressed Defogger harness: {c_name}")
+
+                # Execute physical deletion of unneeded option components
+                if to_delete:
+                    for comp in to_delete:
+                        comp.Select2(False, 0)
+                        swMirror.EditDelete()
+                        log.info(f"Physically deleted component from mirror: {comp.Name2}")
 
             swMirror.ForceRebuild3(False)
             swMirror.Save3(0, errors, warnings)
@@ -755,6 +732,7 @@ class SolidWorksAPI:
                     
                     wb.save(path_to_save)
                 log.info(f"BOM exported with template format to {output_xlsx_path} and {vault_bom_path}")
+                self._export_bom_to_pdf(output_xlsx_path)
                 return
             except Exception as e:
                 log.error(f"Error customizing template BOM: {e}. Falling back to basic BOM generation.")
@@ -797,6 +775,40 @@ class SolidWorksAPI:
             log.warning(f"Could not copy fallback BOM to vault: {e}")
             
         log.info(f"BOM exported (fallback) to: {output_xlsx_path}")
+        self._export_bom_to_pdf(output_xlsx_path)
+
+    def _export_bom_to_pdf(self, bom_xlsx_path: str):
+        try:
+            import win32com.client
+            import pythoncom
+            log.info(f"Converting Excel BOM to PDF: {bom_xlsx_path}")
+            
+            # Initialize COM and dispatch Excel
+            pythoncom.CoInitialize()
+            excel = win32com.client.Dispatch("Excel.Application")
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            
+            abs_xlsx = os.path.abspath(bom_xlsx_path)
+            abs_pdf = abs_xlsx.replace(".xlsx", ".pdf")
+            
+            wb = excel.Workbooks.Open(abs_xlsx)
+            wb.ExportAsFixedFormat(0, abs_pdf)
+            wb.Close(False)
+            excel.Quit()
+            log.info(f"Successfully exported BOM PDF to: {abs_pdf}")
+            
+            # Copy BOM PDF to Vault mirror folder
+            try:
+                bom_dir = Path(DWConstantVault) / "Products" / "JS3" / "Mirrors" / "RAD4"
+                vault_pdf_path = bom_dir / os.path.basename(abs_pdf)
+                shutil.copyfile(abs_pdf, str(vault_pdf_path))
+                os.chmod(str(vault_pdf_path), 0o666)
+                log.info(f"Successfully copied BOM PDF to vault: {vault_pdf_path}")
+            except Exception as ec:
+                log.warning(f"Could not copy BOM PDF to vault: {ec}")
+        except Exception as e:
+            log.error(f"Failed to export BOM PDF via Excel COM API: {e}")
 
     def _update_drawing_notes_via_python(self, swDrawing, cpn: str, driver_wattage: float):
         powerbox = "81330-96W" if driver_wattage <= 96 else "81330-192W"
