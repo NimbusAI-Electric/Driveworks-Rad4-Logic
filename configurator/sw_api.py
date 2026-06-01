@@ -42,9 +42,10 @@ def _copy_file_writable(src: Path, dest: Path):
     except Exception as e:
         log.warning(f"Could not make destination file writable {dest}: {e}")
 
-def find_closest_template(directory: Path, pattern: str, width: float, height: float) -> Path:
+def find_closest_template(directory: Path, pattern: str, width: float, height: float, exclude_name: str = None) -> Path:
     """
     Finds the template file in the directory that is closest in size to (width, height).
+    Prioritizes option-heavy templates by sorting by filename length descending.
     """
     files = list(directory.glob(pattern))
     templates = []
@@ -52,12 +53,19 @@ def find_closest_template(directory: Path, pattern: str, width: float, height: f
     # Exclude generated/released files to avoid using configured mirrors as templates
     for f in files:
         name = f.name
-        # Release files typically contain mount types or lighting codes
-        if any(token in name for token in ["-RM-", "-SM-", "-LO-", "-SO-", "-LSE-", "-LHE-"]):
+        name_upper = name.upper()
+        if exclude_name and exclude_name.upper() in name_upper:
             continue
-        # Standard templates have at most 3 dashes (e.g., RAD4-36.00X36.00-DF-M.SLDASM)
-        if not name.lower().endswith(".slddrw") and name.count('-') > 3:
-            continue
+        # If it is a drawing or Excel BOM template, bypass the checks since drawing/BOM templates typically contain finish and color codes
+        if not (name_upper.endswith(".SLDDRW") or name_upper.endswith("BOM.XLSX")):
+            # Release files typically contain mount types or lighting codes
+            if any(token in name_upper for token in ["-RM-", "-SM-", "-LO-", "-SO-", "-LSE-", "-LHE-"]):
+                continue
+            # Configured files have finish codes (e.g. NK04, CH04, BK05) or color temp (e.g. 30K)
+            if re.search(r'-(BK|NK|CH|BN|BR|BZ|GU|WH)\d{2}', name_upper):
+                continue
+            if re.search(r'-\d{2}K', name_upper):
+                continue
         templates.append(f)
 
     if not templates:
@@ -78,11 +86,12 @@ def find_closest_template(directory: Path, pattern: str, width: float, height: f
         log.warning(f"Could not parse sizes from templates in {directory}. Falling back to first match.")
         return templates[0]
 
-    # Sort by distance first (ascending), then by length of file name (ascending)
-    candidates.sort(key=lambda x: (x[0], x[1]))
+    # Sort by distance first (ascending), then by length of file name (descending) to prioritize option-heavy templates
+    candidates.sort(key=lambda x: (x[0], -x[1]))
     best_file = candidates[0][2]
         
     return best_file
+
 
 class SolidWorksAPI:
     def __init__(self):
@@ -121,16 +130,35 @@ class SolidWorksAPI:
         mirror_dir = Path(vault) / "Products" / "JS3" / "Mirrors" / "RAD4"
         drawing_dir = chassis_dir
 
-        template_chassis = find_closest_template(chassis_dir, "RAD4-*.SLDASM", width, height)
-        template_mirror = find_closest_template(mirror_dir, "RAD4-*-M.SLDASM", width, height)
-        template_drawing = find_closest_template(drawing_dir, "RAD4-*-SALES-AID.SLDDRW", width, height)
-
-        log.info(f"Templates resolved:\n  Chassis: {template_chassis}\n  Mirror: {template_mirror}\n  Drawing: {template_drawing}")
+        template_chassis = find_closest_template(chassis_dir, "RAD4-*.SLDASM", width, height, exclude_name=cpn)
+        template_mirror = find_closest_template(mirror_dir, "RAD4-*-M.SLDASM", width, height, exclude_name=cpn)
+        template_drawing = find_closest_template(drawing_dir, "RAD4-*-SALES-AID.SLDDRW", width, height, exclude_name=cpn)
 
         # Parse standard sizes from selected templates
         m_chassis = re.search(r'RAD4-(\d+\.\d+)X(\d+\.\d+)', template_chassis.name)
         temp_w = float(m_chassis.group(1)) if m_chassis else width
         temp_h = float(m_chassis.group(2)) if m_chassis else height
+
+        # Fallback if option-heavy mirror template is missing in the vault
+        if not template_mirror.exists():
+            log.warning(f"Mirror template {template_mirror} does not exist. Finding fallback...")
+            fallback_pattern = f"RAD4-{temp_w:.2f}X{temp_h:.2f}-*.SLDASM"
+            fallbacks = list(mirror_dir.glob(fallback_pattern))
+            def _is_gen(n):
+                nu = n.upper()
+                return (any(t in nu for t in ["-RM-", "-SM-", "-LO-", "-SO-", "-LSE-", "-LHE-"]) or
+                        re.search(r'-(BK|NK|CH|BN|BR|BZ|GU|WH)\d{2}', nu) or
+                        re.search(r'-\d{2}K', nu))
+            fallbacks = [f for f in fallbacks if f.exists() and not _is_gen(f.name)]
+            if fallbacks:
+                fallbacks.sort(key=lambda f: len(f.name))
+                template_mirror = fallbacks[0]
+                log.info(f"Fallback mirror template resolved: {template_mirror}")
+            else:
+                template_mirror = find_closest_template(mirror_dir, "RAD4-*-M.SLDASM", width, height, exclude_name=cpn)
+                log.info(f"Fallback closest mirror template resolved: {template_mirror}")
+
+        log.info(f"Templates resolved:\n  Chassis: {template_chassis}\n  Mirror: {template_mirror}\n  Drawing: {template_drawing}")
 
         # 2. Build custom extrusion parts/sub-assemblies if size is custom/decimal
         self._configure_custom_extrusions(vault, temp_w, temp_h, width, height)
@@ -311,6 +339,9 @@ class SolidWorksAPI:
         log.info(f"Opening Mirror copy: {out_mirror}")
         swMirror = self.swApp.OpenDoc6(str(out_mirror), swDocASSEMBLY, 1, "", errors, warnings)
         if swMirror:
+            # Activate document to allow component additions and configurations
+            self.swApp.ActivateDoc3(swMirror.GetTitle, True, 2, errors)
+            
             mirror_props = {
                 "PartNumber": cpn + "-M",
                 "Width": f"{width:.2f}",
@@ -337,9 +368,14 @@ class SolidWorksAPI:
             
             # Traverse and configure/suppress/delete option-specific components in mirror
             components = swMirror.GetComponents(True)
+            button_needed = inp.Ava or inp.Keen or inp.Vive
+            to_delete = []
+            
+            # Keep track of clock and defogger components present
+            clock_comps = []
+            defogger_comps = []
+            
             if components:
-                button_needed = inp.Ava or inp.Keen or inp.Vive
-                to_delete = []
                 for comp in components:
                     c_path = comp.GetPathName.lower()
                     c_name = comp.Name2
@@ -365,12 +401,81 @@ class SolidWorksAPI:
                                 comp.ReferencedConfiguration = button_config
                                 log.info(f"Resolved button assembly and set configuration to: {button_config}")
 
-                # Execute physical deletion of unneeded option components
-                if to_delete:
-                    for comp in to_delete:
-                        comp.Select2(False, 0)
-                        swMirror.EditDelete()
-                        log.info(f"Physically deleted component from mirror: {comp.Name2}")
+                    elif "clock option-mirror" in c_path or "clock option-mirror" in c_name.lower():
+                        clock_comps.append(comp)
+                        
+                    elif "defogger-js" in c_path or "defogger-js" in c_name.lower():
+                        defogger_comps.append(comp)
+
+            # Assert Clock component state
+            clock_path = str(Path(vault) / "COMPONENTS" / "STANDARD PARTS" / "CLOCK OPTION" / "CLOCK OPTION-MIRROR.sldasm")
+            if inp.Clock:
+                clock_config = result.ClockConfig
+                if clock_comps:
+                    for comp in clock_comps:
+                        comp.SetSuppression2(2)
+                        comp.ReferencedConfiguration = clock_config
+                        log.info(f"Configured existing clock component: {comp.Name2} with {clock_config}")
+                else:
+                    log.info("Adding missing clock component programmatically...")
+                    try:
+                        # Pre-open the clock component document so AddComponent4 resolves it
+                        self.swApp.OpenDoc6(clock_path, 2, 1, "", errors, warnings) # 2 = swDocASSEMBLY
+                        comp = swMirror.AddComponent4(clock_path, clock_config, 0.0, 0.0, 0.0)
+                        if comp:
+                            log.info(f"Successfully added clock: {comp.Name2} | Config: {comp.ReferencedConfiguration}")
+                        else:
+                            log.warning("Failed to add clock component via AddComponent4.")
+                    except Exception as e:
+                        log.error(f"Error adding clock component: {e}")
+            else:
+                for comp in clock_comps:
+                    to_delete.append(comp)
+
+            # Assert Defogger components state
+            defogger_path = str(Path(vault) / "COMPONENTS" / "STANDARD PARTS" / "Configurator Parts" / "DEFOGGER-JS.SLDPRT")
+            if inp.Defogger:
+                defogger_config = result.DefoggerConfig
+                defogger_qty = result.DefoggerQty
+                
+                # Configure existing defoggers
+                for comp in defogger_comps[:defogger_qty]:
+                    comp.SetSuppression2(2)
+                    comp.ReferencedConfiguration = defogger_config
+                    log.info(f"Configured existing defogger component: {comp.Name2} with {defogger_config}")
+                    
+                # Delete excess defoggers if any
+                if len(defogger_comps) > defogger_qty:
+                    for comp in defogger_comps[defogger_qty:]:
+                        to_delete.append(comp)
+                        
+                # Add missing defoggers
+                curr_count = len(defogger_comps)
+                if curr_count < defogger_qty:
+                    # Pre-open the defogger component document so AddComponent4 resolves it
+                    self.swApp.OpenDoc6(defogger_path, 1, 1, "", errors, warnings) # 1 = swDocPART
+                while curr_count < defogger_qty:
+                    log.info(f"Adding missing defogger component {curr_count + 1} of {defogger_qty}...")
+                    try:
+                        comp = swMirror.AddComponent4(defogger_path, defogger_config, 0.0, 0.0, 0.0)
+                        if comp:
+                            log.info(f"Successfully added defogger: {comp.Name2} | Config: {comp.ReferencedConfiguration}")
+                        else:
+                            log.warning("Failed to add defogger component via AddComponent4.")
+                    except Exception as e:
+                        log.error(f"Error adding defogger component: {e}")
+                    curr_count += 1
+            else:
+                for comp in defogger_comps:
+                    to_delete.append(comp)
+
+            # Execute physical deletion of unneeded option components
+            if to_delete:
+                for comp in to_delete:
+                    comp.Select2(False, 0)
+                    swMirror.EditDelete()
+                    log.info(f"Physically deleted component from mirror: {comp.Name2}")
+
 
             swMirror.ForceRebuild3(False)
             swMirror.Save3(0, errors, warnings)
@@ -383,18 +488,51 @@ class SolidWorksAPI:
         log.info(f"Opening Chassis copy: {out_chassis}")
         swChassis = self.swApp.OpenDoc6(str(out_chassis), swDocASSEMBLY, 1, "", errors, warnings)
         if swChassis:
+            # Activate document to allow subassembly traversal and component modifications
+            self.swApp.ActivateDoc3(swChassis.GetTitle, True, 2, errors)
+            
             # Set driver configuration
             components = swChassis.GetComponents(True)
             driver_found = False
             for comp in components:
                 name = comp.Name2
                 if "81330-DRIVER-MODULE" in name:
-                    log.info(f"Found driver component: {name}, setting configuration to {result.DriverEnclosurePN}")
-                    comp.ReferencedConfiguration = result.DriverEnclosurePN
+                    log.info(f"Found driver component: {name}, resolving and setting configuration to Default")
+                    comp.SetSuppression2(2)  # FullyResolved
+                    comp.ReferencedConfiguration = "Default"
                     driver_found = True
                     break
             if not driver_found:
                 log.warning("Driver module component not found in Chassis assembly!")
+            else:
+                # Force rebuild so SolidWorks instantiates components of the new driver configuration
+                swChassis.ForceRebuild3(False)
+
+            # Traverse recursively to configure chassis clock & defogger wires
+            all_chassis_comps = swChassis.GetComponents(False)  # False = recursive traversal
+            if all_chassis_comps:
+                for comp in all_chassis_comps:
+                    comp_path = comp.GetPathName.lower()
+                    comp_name = comp.Name2.lower()
+                    
+                    if "clock option-chassis" in comp_path or "clock option-chassis" in comp_name:
+                        if inp.Clock and inp.ClockType in ["CK1", "CK2"]:
+                            res = comp.SetSuppression2(2)  # Fully resolved
+                            clock_wire_config = f"{inp.ClockType} SHORT WIRES"
+                            comp.ReferencedConfiguration = clock_wire_config
+                            log.info(f"Unsuppressed clock wire harness: {comp_name} (res: {res}, suppressed after: {comp.IsSuppressed}) and set config to: {clock_wire_config}")
+                        else:
+                            res = comp.SetSuppression2(0)  # Suppressed
+                            log.info(f"Suppressed clock wire harness component in chassis (res: {res}, suppressed after: {comp.IsSuppressed}).")
+                            
+                    elif "74826-harness-wire-defogger-driver-box" in comp_path or "74826-harness-wire-defogger-driver-box" in comp_name:
+                        if inp.Defogger:
+                            res = comp.SetSuppression2(2)  # Fully resolved
+                            log.info(f"Unsuppressed defogger wire harness in chassis driver box (res: {res}, suppressed after: {comp.IsSuppressed}).")
+                        else:
+                            res = comp.SetSuppression2(0)  # Suppressed
+                            log.info(f"Suppressed defogger wire harness in chassis driver box (res: {res}, suppressed after: {comp.IsSuppressed}).")
+
 
             chassis_props = {
                 "PartNumber": cpn + "-C",
@@ -444,13 +582,13 @@ class SolidWorksAPI:
             # Update drawing custom properties
             FINISH_MAP = {
                 "BK": "MATTE BLACK", "BK05": "MATTE BLACK",
-                "NK": "NATURAL NICKEL", "NK04": "NATURAL NICKEL",
-                "CH": "POLISHED CHROME", "CH04": "POLISHED CHROME",
+                "NK": "ETCHED NICKEL", "NK04": "ETCHED NICKEL",
+                "CH": "ETCHED CHROME", "CH04": "ETCHED CHROME", "CH11": "BRIGHT CHROME",
                 "BN": "BRUSHED NICKEL", "BN04": "BRUSHED NICKEL",
-                "BR": "BRUSHED BRONZE", "BR02": "BRUSHED BRONZE",
-                "BZ24": "BRONZE", "BZ47": "BRONZE",
+                "BR": "BRUSHED BRASS", "BR02": "BRUSHED BRASS", "BR21": "BRIGHT BRASS",
+                "BZ24": "ETCHED GOLDEN BRONZE", "BZ47": "BRONZE",
                 "GU": "GUN METAL", "GU06": "GUN METAL",
-                "WH": "WHITE", "WH01": "WHITE",
+                "WH": "GLOSS WHITE", "WH01": "GLOSS WHITE",
             }
             finish_name = FINISH_MAP.get(inp.Finish, inp.Finish)
             try:
@@ -478,11 +616,11 @@ class SolidWorksAPI:
             self._set_custom_properties(swDrawing, drawing_props)
             log.info("Drawing custom properties set successfully.")
 
-            # Run Python feature traversal to update Sheet 2 notes (mirror assembly and powerbox assembly)
+            # Run Option A dynamic notes update and suppression
             try:
-                self._update_drawing_notes_via_python(swDrawing, cpn, result.DriverWattage)
+                self._update_drawing_notes_option_a(swDrawing, inp, result)
             except Exception as e:
-                log.error(f"Failed to update Sheet 2 notes via Python traversal: {e}")
+                log.error(f"Failed to update drawing notes via Option A: {e}")
 
             # Rebuild twice to ensure all properties propagate to title blocks
             swDrawing.ForceRebuild3(False)
@@ -700,20 +838,21 @@ class SolidWorksAPI:
         bom_dir = Path(vault) / "Products" / "JS3" / "Mirrors" / "RAD4"
         vault_bom_path = bom_dir / f"{result.CPN}-M-BOM.xlsx"
 
-        # Search for a template in the vault
-        bom_templates = list(bom_dir.glob("RAD4-*-M-BOM.xlsx"))
+        # Search for a template in the vault using closest match logic
         template_copied = False
-
-        if bom_templates:
-            template_bom = bom_templates[0]
+        try:
+            m = re.search(r'RAD4-(\d+\.\d+)X(\d+\.\d+)', result.CPN, re.IGNORECASE)
+            width = float(m.group(1)) if m else 36.0
+            height = float(m.group(2)) if m else 36.0
+            
+            template_bom = find_closest_template(bom_dir, "RAD4-*-M-BOM.xlsx", width, height, exclude_name=result.CPN)
             log.info(f"Using vault BOM template: {template_bom}")
-            try:
-                # Copy to both locations
-                _copy_file_writable(template_bom, Path(output_xlsx_path))
-                _copy_file_writable(template_bom, vault_bom_path)
-                template_copied = True
-            except Exception as e:
-                log.warning(f"Could not copy vault BOM template: {e}")
+            # Copy to both locations
+            _copy_file_writable(template_bom, Path(output_xlsx_path))
+            _copy_file_writable(template_bom, vault_bom_path)
+            template_copied = True
+        except Exception as e:
+            log.warning(f"Could not resolve or copy vault BOM template: {e}")
 
         if template_copied:
             try:
@@ -800,29 +939,225 @@ class SolidWorksAPI:
         except Exception as e:
             log.error(f"Failed to export BOM PDF via Excel COM API: {e}")
 
-    def _update_drawing_notes_via_python(self, swDrawing, cpn: str, driver_wattage: float):
-        powerbox = "81330-96W" if driver_wattage <= 96 else "81330-192W"
-        log.info(f"Updating Sheet 2 notes in SolidWorks via design tree feature traversal (wattage: {driver_wattage}W)")
+    def _parse_defogger_config(self, config_name: str) -> tuple[str, str]:
+        c_upper = config_name.upper()
+        # Extract size from config name e.g. "15230-120V-22.5x10.5" -> "22.5X10.5"
+        m = re.search(r'-(\d+\.?\d*X\d+\.?\d*)$', c_upper)
+        size = m.group(1) if m else "10.5X10.5"
         
-        # Traverse design tree features
-        feat = swDrawing.FirstFeature
-        while feat:
-            if feat.GetTypeName2 == "DrSheet" and feat.Name.lower() == "sheet2":
-                sf = feat.GetFirstSubFeature
-                while sf:
-                    if sf.GetTypeName2 in ["AbsoluteView", "UnfoldedView", "SectionAssemView"]:
-                        view = sf.GetSpecificFeature2
-                        if view:
-                            note = view.GetFirstNote
-                            while note:
-                                text = note.GetText
-                                if text and "mirror assembly:" in text.lower():
-                                    new_text = f"MIRROR ASSEMBLY:  {cpn}-M\nPOWERBOX ASSEMBLY: {powerbox}"
-                                    note.SetText(new_text)
-                                    log.info(f"Successfully updated drawing note in view '{sf.Name}': {new_text}")
-                                note = note.GetNext
-                    sf = sf.GetNextSubFeature
-            feat = feat.GetNextFeature
+        if "15229" in c_upper:
+            watts = "15"
+        elif "15230" in c_upper:
+            watts = "25"
+        elif "15231" in c_upper:
+            watts = "50"
+        elif "15232" in c_upper:
+            watts = "100"
+        else:
+            watts = "25"
+            
+        return size, watts
+
+    def _update_drawing_notes_option_a(self, swDrawing, inp: RAD4Inputs, result: RAD4Result):
+        log.info("Updating drawing notes using Option A dynamic rules...")
+        
+        # Calculate dynamic text blocks
+        amp_120 = (result.PowerRequirement / 120.0) * 0.9
+        amp_277 = (result.PowerRequirement / 277.0) * 0.9
+        cct_map = {
+            "27K": "2,700",
+            "30K": "3,000",
+            "35K": "3,500",
+            "40K": "4,000"
+        }
+        cct_val = cct_map.get(inp.LEDColorTemp, "3,000")
+        lm_ft = 302.0
+        total_lumens = round(result.LEDCutLengthIn * lm_ft / 12.0)
+        
+        # 1. Main specs block
+        if inp.Voltage == "277V":
+            power_str = f"POWER REQUIREMENTS:\n277 VOLTS, {amp_277:.2f} AMPS"
+        else:
+            power_str = f"POWER REQUIREMENTS:\n120 VOLTS, {amp_120:.2f} AMPS"
+            
+        spec_text = (
+            f"{power_str}\n\n"
+            f"LED SPECIFICATION:\n"
+            f"LED TYPE: REPLACEABLE FLEX STRIP\n"
+            f"LENGTH (IN): {round(result.LEDCutLengthIn)}\n"
+            f"WATTAGE (W): {round(result.PowerRequirement)}\n"
+            f"CALCULATED L70 LIFESPAN (HRS): 140,000\n"
+            f"CCT(K): {cct_val}\n"
+            f"TOTAL INITIAL LUMENS PER FIXTURE: {total_lumens:,} @ 302 LM/FT\n"
+            f"CRI: 90+"
+        )
+        
+        if inp.Defogger:
+            pad_size, pad_watts = self._parse_defogger_config(result.DefoggerConfig)
+            spec_text += (
+                f"\n\nDEFOGGER SPECIFICATION:\n"
+                f"WATTAGE: {pad_watts}W\n"
+                f"VOLTAGE: 120V"
+            )
+            
+        spec_text += (
+            f"\n\nFIXTURE SPECIFICATION:\n"
+            f"WEIGHT: $PRPSHEET:\"Weight\" LBS (EST.)"
+        )
+        
+        # 2. Spec instructions block
+        spec_inst = "SPECIFICATION:\n"
+        if inp.DimmingType in ("D1", "D2") or inp.Keen or inp.Ava:
+            spec_inst += (
+                "BRING MC CABLE TO ENCLOSURE. INSERT GROUND WIRE IN GROUNDED \n"
+                "CONNECTOR. INSERT HOT AND NEUTRAL WIRE INTO LUMINAIRE DISCONNECT. \n"
+                "LOW VOLTAGE CONTROL WIRES ARE BROUGHT IN THROUGH THE SECOND \n"
+                "KNOCKOUT. NO ELECTRICAL BOX REQUIRED. ELECTRICAL POWER SHOULD BE \n"
+                "CONTROLLED BY A WALL SWITCH (BY OTHERS).\n\n"
+            )
+        else:
+            spec_inst += (
+                "BRING MC CABLE TO DRIVER ENCLOSURE EITHER DIRECTLY FROM\n"
+                "BEHIND INTO KNOCKOUT OR PROVIDE (30\" MAX) WHIP TO SIDE\n"
+                "KNOCKOUT. INSERT GROUND WIRE IN GROUNDED CONNECTOR.\n"
+                "INSERT HOT AND NEUTRAL WIRE INTO LUMINAIRE DISCONNECT.\n"
+                "NO ELECTRICAL BOX REQUIRED. ELECTRICAL POWER SHOULD BE\n"
+                "CONTROLLED BY A WALL SWITCH (BY OTHERS).\n\n"
+            )
+        spec_inst += (
+            "MIRROR SHOULD BE MOUNTED TO A MECHANICALLY SOUND\n"
+            "SURFACE SUCH AS WALL STUDS TO SUPPORT ITS WEIGHT."
+        )
+        if inp.Keen or inp.Ava or inp.Vive:
+            spec_inst += (
+                "\n\nATTENTION: \n"
+                "THIS PRODUCT MUST BE CONNECTED TO EARTH GROUND IN\n"
+                "ACCORDANCE WITH NEC CODE 250.20 (B). IMPROPER GROUND CAN \n"
+                "RESULT IN IRREGULAR FUNCTION OF THE UNIT."
+            )
+        if inp.Keen and inp.Defogger:
+            spec_inst += (
+                "\n\nKEEN / DEFOGGER DISCLAIMER:\n"
+                "KEEN UNIT CONTROLS THE LIGHTING ONLY. SEPARATE WALL SWITCH IS \n"
+                "REQUIRED TO CONTROL FIXTURE / DEFOGGER POWER."
+            )
+            
+        # 3. Dimming compatibility
+        if inp.DimmingType in ("D1", "DM"):
+            dimmer_text = (
+                "DIMMER COMPATIBILITY:\n"
+                "TO ENSURE PROPER OPERATION OF THIS DIMMABLE PRODUCT, IT IS IMPORTANT\n"
+                "TO SELECT A COMPATIBLE DIMMING SWITCH. THIS LUMINAIRE REQUIRES A 0-10V\n"
+                "ELECTRONIC DIMMER SWITCH. ELECTRIC MIRROR IS NOT RESPONSIBLE FOR\n"
+                "DIMMER SWITCH COMPATIBILITY. MUST BE INSTALLED IN ACCORDANCE WITH\n"
+                "ALL NATIONAL AND LOCAL ELECTRICAL CODES."
+            )
+        elif inp.DimmingType == "D2":
+            dimmer_text = (
+                "DIMMER COMPATIBILITY:\n"
+                "TO ENSURE PROPER OPERATION OF THIS DIMMABLE PRODUCT IT IS IMPORTANT TO\n"
+                "SELECT A COMPATIBLE DIMMING SWITCH. THIS LUMINAIRE REQUIRES A COMPATIBLE\n"
+                "FORWARD PHASE LINE DIMMER SWITCH. CONTACT THE CONTROLLER\n"
+                "MANUFACTURER TO CONFIRM COMPATIBILITY WITH THIS PRODUCT. MUST BE\n"
+                "INSTALLED IN ACCORDANCE WITH ALL NATIONAL AND LOCAL ELECTRICAL CODES.\n"
+                "ELECTRIC MIRROR IS NOT RESPONSIBLE FOR DIMMER SWITCH COMPATIBILITY. THIS\n"
+                "PRODUCT USES: SMT-024-096VTSP TRIAC PHASE DIMMING DRIVER."
+            )
+        else:
+            dimmer_text = ""
+            
+        # 4. Defogger detail
+        if inp.Defogger:
+            pad_size, pad_watts = self._parse_defogger_config(result.DefoggerConfig)
+            defogger_text = (
+                f"DEFOGGER SPECIFICATIONS:\n"
+                f"{pad_size}\n"
+                f"120V, {pad_watts}W"
+            )
+            outline_text = (
+                f"OUTLINE OF\n"
+                f"DEFOGGER\n"
+                f"{pad_size}"
+            )
+        else:
+            defogger_text = ""
+            outline_text = ""
+            
+        # 5. Button Callout
+        if inp.Keen:
+            button_text = "KEEN 1-TOUCH CONTROL BUTTON\nSEE SPECIFICATION SHEET\nFOR ADDITIONAL DETAILS"
+        elif inp.Ava:
+            button_text = "AVA 1-TOUCH CONTROL BUTTON\nSEE SPECIFICATION SHEET\nFOR ADDITIONAL DETAILS"
+        elif inp.Vive:
+            button_text = "VIVE CONTROL BUTTON\nSEE SPECIFICATION SHEET\nFOR ADDITIONAL DETAILS"
+        else:
+            button_text = ""
+            
+        # Let's perform drawing sheet traversal
+        try:
+            sheet_names = swDrawing.GetSheetNames
+            for s_name in sheet_names:
+                swDrawing.ActivateSheet(s_name)
+                view = swDrawing.GetFirstView
+                while view:
+                    note = view.GetFirstNote
+                    while note:
+                        text = note.GetText
+                        name = note.GetName
+                        text_lower = text.lower() if text else ""
+                        
+                        # Apply rules based on text content and name matches
+                        updated = False
+                        
+                        # Rule 1: Main specs block
+                        if name == "DetailItem378" or ("power requirements:" in text_lower and "led specification:" in text_lower):
+                            note.SetText(spec_text)
+                            log.info(f"Updated main specs block '{name}' on sheet '{s_name}'")
+                            updated = True
+                            
+                        # Rule 2: Spec instructions
+                        elif name in ("DetailItem436", "DetailItem435", "DetailItem434") or ("specification:" in text_lower and "bring mc cable" in text_lower):
+                            note.SetText(spec_inst)
+                            log.info(f"Updated spec instructions '{name}' on sheet '{s_name}'")
+                            updated = True
+                            
+                        # Rule 3: Dimmer compatibility
+                        elif name == "DetailItem409" or name == "DetailItem432" or "dimmer compatibility:" in text_lower:
+                            note.SetText(dimmer_text)
+                            log.info(f"Updated dimmer compatibility '{name}' on sheet '{s_name}'")
+                            updated = True
+                            
+                        # Rule 4: Defogger specifications box
+                        elif name == "DetailItem415" or "defogger specifications:" in text_lower or (text_lower.strip().startswith("defogger:") and "wattage:" in text_lower):
+                            note.SetText(defogger_text)
+                            log.info(f"Updated defogger spec box '{name}' on sheet '{s_name}'")
+                            updated = True
+                            
+                        # Rule 5: Defogger outline callout
+                        elif name == "DetailItem392" or "outline of\ndefogger" in text_lower or "outline of\r\ndefogger" in text_lower:
+                            note.SetText(outline_text)
+                            log.info(f"Updated defogger outline '{name}' on sheet '{s_name}'")
+                            updated = True
+                            
+                        # Rule 6: Touch button callout
+                        elif name == "DetailItem437" or "1-touch control" in text_lower or "control button" in text_lower:
+                            note.SetText(button_text)
+                            log.info(f"Updated touch button callout '{name}' on sheet '{s_name}'")
+                            updated = True
+                            
+                        # Rule 7: Clean up duplicates (clear standalone warning notes since they are now appended to spec_inst)
+                        elif not updated:
+                            if "earth ground in\naccordance with nec" in text_lower or "earth ground in\r\naccordance with nec" in text_lower:
+                                note.SetText("")
+                                log.info(f"Cleared standalone grounding warning '{name}' to avoid duplicate")
+                            elif "keen / defogger disclaimer:" in text_lower:
+                                note.SetText("")
+                                log.info(f"Cleared standalone keen disclaimer '{name}' to avoid duplicate")
+                                
+                        note = note.GetNext
+                    view = view.GetNextView
+        except Exception as e:
+            log.error(f"Error during Sheet/View note traversal: {e}")
 
     def close(self):
         pass

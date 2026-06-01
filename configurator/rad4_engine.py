@@ -192,6 +192,12 @@ class RAD4Result:
     ChassisAssemblyPath:          str   = ""
     SalesAidDrawingPath:          str   = ""
 
+    # Options Config
+    DefoggerConfig:               str   = ""
+    DefoggerQty:                  int   = 0
+    ClockConfig:                  str   = ""
+
+
 
 # =============================================================================
 # CPN BUILDER  (replicates DWVariablePartNumber — JS3 Chassis.csv lines 159-183)
@@ -199,47 +205,25 @@ class RAD4Result:
 
 def build_cpn(inp: RAD4Inputs) -> str:
     """
-    Builds the Customer Part Number string.
-    Directly replicates the DWVariablePartNumber formula.
-
-    DW formula (simplified for RAD4):
-        MirrorName &
-        "-" & Fixed(UnitWidth,2) & "X" & Fixed(UnitHeight,2) &
-        If(MountType <> "", "-" & MountType, "") &
-        If(Dimming AND D1, "-D1", "") &
-        If(Dimming AND D2, "-D2", "") &
-        If(Ava, "-" & DimmingType, "") &
-        If(Keen, "-" & DimmingType, "") &
-        "-" & Lighting &
-        If(NightLight, "-" & NightLightType, "") &
-        If(CordConnect, "-" & CordConnectType, "") &
-        If(Clock, "-" & ClockType, "") &
-        If(Defogger, "-DF", "") &
-        If(Voltage <> "Standard", "-" & Voltage, "") &
-        "-" & Finish &
-        "-" & LEDColorTemp
+    Builds the Customer Part Number (CPN) string matching DriveWorks logic.
+    Directly replicates the DWVariableRadCPN / DWVariableFileName formula from RAD3 project.
+    
+    Format:
+        RAD4-{Width}X{Height}-{Finish}-{Options...}-{LEDColorTemp}
+        
+    Note: MountType (-RM/-SM) and Lighting (-LO/-LSE/-LHE) are excluded
+    from the customer-facing part number, except for Standard Output (-SO).
     """
     cpn = f"RAD4-{inp.UnitWidth:.2f}X{inp.UnitHeight:.2f}"
 
-    if inp.MountType:
-        cpn += f"-{inp.MountType}"
+    # 1. Finish (comes right after dimensions)
+    cpn += f"-{inp.Finish}"
 
-    # Dimming
-    if inp.DimmingType in ("D1",):
-        cpn += "-D1"
-    elif inp.DimmingType in ("D2",):
-        cpn += "-D2"
-    elif inp.Ava and inp.DimmingType:
-        cpn += f"-{inp.DimmingType}"
-    elif inp.Keen and inp.DimmingType:
-        cpn += f"-{inp.DimmingType}"
-
-    cpn += f"-{inp.Lighting}"
-
-    if inp.NightLight and inp.NightLightType:
-        cpn += f"-{inp.NightLightType}"
+    # 2. Cord Connect
     if inp.CordConnect and inp.CordConnectType:
         cpn += f"-{inp.CordConnectType}"
+
+    # 3. Clock
     if inp.Clock and inp.ClockType:
         loc = ""
         if inp.ClockLocation == "Left":
@@ -247,10 +231,28 @@ def build_cpn(inp: RAD4Inputs) -> str:
         elif inp.ClockLocation == "Center":
             loc = "C"
         cpn += f"-{inp.ClockType}{loc}"
+
+    # 4. Dimming / Button Option
+    if inp.DimmingType in ("D1", "D2"):
+        cpn += f"-{inp.DimmingType}"
+    elif inp.Ava and inp.DimmingType:
+        cpn += f"-{inp.DimmingType}"
+    elif inp.Keen and inp.DimmingType:
+        cpn += f"-{inp.DimmingType}"
+
+    # 5. Defogger
     if inp.Defogger:
         cpn += "-DF"
+
+    # 6. Lighting (Only append if standard output -SO. LO, LSE, and LHE are omitted)
+    if inp.Lighting == "SO":
+        cpn += "-SO"
+
+    # 7. Other options
     if inp.NonBrilliant:
         cpn += "-NB"
+    if inp.NightLight and inp.NightLightType:
+        cpn += f"-{inp.NightLightType}"
     if inp.Vive and inp.ViveType:
         loc = ""
         if inp.ViveLocation == "Left":
@@ -262,13 +264,16 @@ def build_cpn(inp: RAD4Inputs) -> str:
         cpn += f"-{inp.WallGlowType}"
     if inp.Wardrobe:
         cpn += "-WR"
+        
+    # 8. Voltage
     if inp.Voltage != "Standard":
         cpn += f"-{inp.Voltage}"
 
-    cpn += f"-{inp.Finish}"
+    # 9. LED Color Temp (placed at the end)
     cpn += f"-{inp.LEDColorTemp}"
 
     return cpn
+
 
 
 # =============================================================================
@@ -500,6 +505,75 @@ def calculate_driver(driver_type: str, buffered_power: float) -> tuple[int, int]
 
 
 # =============================================================================
+# DEFOGGER GRID LOOKUP  (replicates the user dimensions table)
+# =============================================================================
+
+def get_defogger_config_and_qty(w: float, h: float) -> tuple[str, int]:
+    """
+    Returns (config_name, quantity) of defogger pads based on the width and height grid.
+    """
+    w_limits = [24, 30, 36, 42, 48, 54, 60, 66, 72, 78]
+    h_limits = [24, 30, 36, 42, 48, 54, 60, 66, 72, 78, 84]
+    
+    col_idx = -1
+    for i, limit in enumerate(w_limits):
+        if w >= limit:
+            col_idx = i
+            
+    row_idx = -1
+    for j, limit in enumerate(h_limits):
+        if h >= limit:
+            row_idx = j
+            
+    if col_idx == -1 or row_idx == -1:
+        return "15229-120V-10.5X10.5", 1
+        
+    grid = [
+        # Row 24 (h >= 24)
+        [ ("15229-120V-10.5X10.5", 1), ("15229-120V-10.5X10.5", 1), ("15229-120V-10.5X10.5", 1), ("15230-120V-22.5x10.5", 1), ("15230-120V-22.5x10.5", 1), ("15230-120V-22.5x10.5", 1), ("15230-120V-22.5x10.5", 2), ("15230-120V-22.5x10.5", 2), ("15230-120V-22.5x10.5", 2), ("15230-120V-22.5x10.5", 2) ],
+        # Row 30 (h >= 30)
+        [ ("15229-120V-10.5X10.5", 1), ("15229-120V-10.5X10.5", 1), ("15229-120V-10.5X10.5", 1), ("15230-120V-22.5x10.5", 1), ("15230-120V-22.5x10.5", 1), ("15230-120V-22.5x10.5", 1), ("15230-120V-22.5x10.5", 2), ("15230-120V-22.5x10.5", 2), ("15230-120V-22.5x10.5", 2), ("15230-120V-22.5x10.5", 2) ],
+        # Row 36 (h >= 36)
+        [ ("15229-120V-10.5X10.5", 1), ("15229-120V-10.5X10.5", 1), ("15230-120V-10.5X22.5", 1), ("15230-120V-22.5x10.5", 1), ("15230-120V-22.5x10.5", 1), ("15230-120V-22.5x10.5", 1), ("15230-120V-22.5x10.5", 2), ("15230-120V-22.5x10.5", 2), ("15230-120V-22.5x10.5", 2), ("15230-120V-22.5x10.5", 2) ],
+        # Row 42 (h >= 42)
+        [ ("15229-120V-10.5X10.5", 1), ("15229-120V-10.5X10.5", 1), ("15230-120V-10.5X22.5", 1), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1) ],
+        # Row 48 (h >= 48)
+        [ ("15230-120V-10.5X22.5", 1), ("15230-120V-10.5X22.5", 1), ("15230-120V-10.5X22.5", 1), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1) ],
+        # Row 54 (h >= 54)
+        [ ("15230-120V-10.5X22.5", 1), ("15230-120V-10.5X22.5", 1), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1) ],
+        # Row 60 (h >= 60)
+        [ ("15230-120V-10.5X22.5", 1), ("15230-120V-10.5X22.5", 1), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1) ],
+        # Row 66 (h >= 66)
+        [ ("15230-120V-10.5X22.5", 2), ("15230-120V-10.5X22.5", 2), ("15231-120V-20.5X20.5", 1), ("15231-120V-20.5X20.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1) ],
+        # Row 72 (h >= 72)
+        [ ("15230-120V-10.5X22.5", 2), ("15230-120V-10.5X22.5", 2), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 2) ],
+        # Row 78 (h >= 78)
+        [ ("15230-120V-10.5X22.5", 2), ("15230-120V-10.5X22.5", 2), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 2), ("15232-120V-40.5X20.5", 2) ],
+        # Row 84 (h >= 84)
+        [ ("15230-120V-10.5X22.5", 2), ("15230-120V-10.5X22.5", 2), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-20.5X40.5", 1), ("15232-120V-40.5X20.5", 1), ("15232-120V-40.5X20.5", 2), ("15232-120V-40.5X20.5", 2), ("15232-120V-40.5X20.5", 2) ]
+    ]
+    
+    if col_idx >= len(grid[0]) or row_idx >= len(grid):
+        return "15229-120V-10.5X10.5", 1
+        
+    if row_idx == 0 and col_idx == 0:
+        return "15229-120V-10.5X10.5", 0
+        
+    return grid[row_idx][col_idx]
+
+def calculate_clock_config(clock_type: str) -> str:
+    """Returns the clock configuration string for the mirror clock assembly."""
+    if clock_type == "CK1":
+        return "CK1-MIRROR"
+    elif clock_type == "CK2":
+        return "CK2-MIRROR"
+    elif clock_type == "CK3":
+        return "CK3-MIRROR - USE ONLY WHEN NO CHASSIS OR BOX"
+    return "Delete"
+
+
+
+# =============================================================================
 # DRIVER ENCLOSURE PN  (RAD3.csv lines 146-168 — EnclosureInstance formula)
 #
 # RAD3.csv EnclosureInstance formula (verbatim):
@@ -715,6 +789,22 @@ def build_bom(inp: RAD4Inputs, result: "RAD4Result") -> dict:
     # DW: sum of GasketBumper1..12 flags
     bom["PN15_Qty"] = _calculate_gasket_bumper_qty(inp)
 
+    # PN16_Defogger — Defogger pad
+    if inp.Defogger:
+        bom["PN16_Defogger"] = result.DefoggerConfig.split('-')[0]
+        bom["PN16_Defogger_Qty"] = str(result.DefoggerQty)
+    else:
+        bom["PN16_Defogger"] = ""
+        bom["PN16_Defogger_Qty"] = ""
+
+    # PN15_Clock — Clock option (in mirror BOM)
+    if inp.Clock:
+        bom["PN15_Clock"] = "49684"
+        bom["PN15_Clock_Qty"] = "1"
+    else:
+        bom["PN15_Clock"] = ""
+        bom["PN15_Clock_Qty"] = ""
+
     # PN21 — Cord connect assembly  JS3 Chassis lines 321-323
     if inp.CordConnect:
         bom["PN21_Cord_Connect"] = "12598" if inp.CordConnectType == "CC" else "71309"
@@ -731,6 +821,7 @@ def build_bom(inp: RAD4Inputs, result: "RAD4Result") -> dict:
 
     # Driver enclosure
     bom["Driver_Enclosure"] = result.DriverEnclosurePN
+
 
     # Standoff kit  (from Cosmon Test Components.csv — 81187-KIT-STANDOFF-RAD3)
     bom["Standoff_Kit"] = f"81187-{inp.MountType}-KIT-STANDOFF-RAD3"
@@ -844,8 +935,20 @@ def run(inp: RAD4Inputs) -> RAD4Result:
     r.LEDPN            = calculate_led_pn(inp)
     r.LED1HarnessConfig = calculate_led_harness_config(1, r.DriverType)
 
+    # 15. Options config
+    if inp.Defogger:
+        r.DefoggerConfig, r.DefoggerQty = get_defogger_config_and_qty(inp.UnitWidth, inp.UnitHeight)
+    else:
+        r.DefoggerConfig, r.DefoggerQty = "15229-120V-10.5X10.5", 0
+        
+    if inp.Clock:
+        r.ClockConfig = calculate_clock_config(inp.ClockType)
+    else:
+        r.ClockConfig = "Delete"
+
     # 15. BOM
     r.BOM = build_bom(inp, r)
+
 
     # 16. SolidWorks file paths
     paths = build_file_paths(r.CPN)
@@ -886,7 +989,7 @@ if __name__ == "__main__":
     print(f"Panel H×V (mm):    {result.HorizontalPanelOuterDimEncmm:.2f} × {result.VerticalPanelOuterDimEncmm:.2f}")
     print(f"LED Base Length:   {result.LEDBaseLengthEnc:.2f} mm")
     print(f"Raw Segments:      {result.LEDCuttableSegmentsEnc}")
-    print(f"Final Segments:    {result.LEDCuttableSegmentsFinal}  (cap: {RAD4_MAX_SEGMENTS})")
+    print(f"Final Segments:    {result.LEDCuttableSegmentsFinal}")
     print(f"LED Strips:        {result.LEDStripsRequiredEnc}")
     print(f"LED Cut Length:    {result.LEDCutLengthIn:.2f} in")
     print(f"Watts/m:           {result.WattsPerMeter}")
