@@ -160,14 +160,18 @@ class SolidWorksAPI:
         log.info("Configuring custom LED strip assembly locally...")
         out_led_asm = self._configure_local_led(vault, output_dir, width, height, result.LEDPN)
 
-        # Resolve chassis and drawing templates dynamically from the vault using closest size match
+        # Resolve chassis template dynamically from the vault using closest size match
         chassis_dir = Path(vault) / "Products" / "JS3" / "Assemblies" / "RAD4"
-        drawing_dir = chassis_dir
-
         template_chassis = find_closest_template(chassis_dir, "RAD4-*.SLDASM", width, height, exclude_name=cpn)
-        template_drawing = find_closest_template(drawing_dir, "RAD4-*-SALES-AID.SLDDRW", width, height, exclude_name=cpn)
+        
+        # Load generic Sales Aid template drawing from repository configurator/templates/
+        templates_dir = Path(__file__).parent / "templates"
+        template_drawing = templates_dir / "RAD4-GENERIC-SALES-AID.SLDDRW"
+        
+        if not template_drawing.exists():
+            raise FileNotFoundError(f"Generic drawing template not found in {templates_dir}")
 
-        log.info(f"Copying chassis and drawing templates from vault...")
+        log.info(f"Copying chassis template from vault and local generic drawing template...")
         _copy_file_writable(template_chassis, out_chassis)
         _copy_file_writable(template_drawing, out_drawing)
 
@@ -192,24 +196,21 @@ class SolidWorksAPI:
         success = self.swApp.ReplaceReferencedDocument(str(out_chassis), str(ref_mirror_temp), str(out_mirror))
         log.info(f"ReplaceReferencedDocument (Chassis -> Mirror) replacing {ref_mirror_temp} with {out_mirror}: {success}")
 
-        # Replace chassis in drawing copy
-        m_drawing = re.search(r'RAD4-(\d+\.\d+)X(\d+\.\d+)', template_drawing.name)
-        temp_w_d = float(m_drawing.group(1)) if m_drawing else width
-        temp_h_d = float(m_drawing.group(2)) if m_drawing else height
+        # Programmatically find and replace assembly dependency in drawing template copy
+        drawing_deps = self.swApp.GetDocumentDependencies2(str(out_drawing), True, True, False)
+        ref_chassis_temp = None
+        if drawing_deps:
+            for i in range(0, len(drawing_deps), 2):
+                dep_path = drawing_deps[i+1] if i+1 < len(drawing_deps) else ""
+                if dep_path and dep_path.lower().endswith(".sldasm"):
+                    ref_chassis_temp = dep_path
+                    break
         
-        possible_temps = [
-            str(chassis_dir / f"RAD4-{temp_w_d:.2f}X{temp_h_d:.2f}.SLDASM"),
-            str(chassis_dir / f"RAD4-{temp_w_d:.2f}X{temp_h_d:.2f}-DF.SLDASM"),
-            str(chassis_dir / f"RAD4-{temp_w_d:.2f}X{temp_h_d:.2f}-KG.SLDASM"),
-        ]
-        replaced = False
-        for temp in possible_temps:
-            if self.swApp.ReplaceReferencedDocument(str(out_drawing), temp, str(out_chassis)):
-                replaced = True
-                log.info(f"ReplaceReferencedDocument (Drawing -> Chassis) replacing {temp} with {out_chassis}: True")
-                break
-        if not replaced:
-            log.warning("Could not automatically replace chassis reference in drawing.")
+        if ref_chassis_temp:
+            success_draw = self.swApp.ReplaceReferencedDocument(str(out_drawing), str(ref_chassis_temp), str(out_chassis))
+            log.info(f"ReplaceReferencedDocument (Drawing -> Chassis) replacing {ref_chassis_temp} with {out_chassis}: {success_draw}")
+        else:
+            log.warning("Could not automatically resolve assembly dependency in generic drawing template.")
 
         errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
         warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
@@ -742,163 +743,138 @@ class SolidWorksAPI:
             log.warning("openpyxl or datetime not installed — skipping Excel BOM.")
             return
 
-        vault = DWConstantVault
-        bom_dir = Path(vault) / "Products" / "JS3" / "Mirrors" / "RAD4"
+        # Load generic BOM template from repository configurator/templates/
+        templates_dir = Path(__file__).parent / "templates"
+        template_bom = templates_dir / "RAD4-GENERIC-M-BOM.xlsx"
+        
+        if not template_bom.exists():
+            log.error(f"Generic BOM template not found at {template_bom}")
+            return
 
-        # Search for a template in the vault using closest match logic
-        template_copied = False
-        width = inp.UnitWidth
-        height = inp.UnitHeight
         try:
-            template_bom = find_closest_template(bom_dir, "RAD4-*-M-BOM.xlsx", width, height, exclude_name=result.CPN)
-            log.info(f"Using vault BOM template: {template_bom}")
-            # Copy only to local output path
+            log.info(f"Using generic BOM template: {template_bom}")
             _copy_file_writable(template_bom, Path(output_xlsx_path))
-            template_copied = True
-        except Exception as e:
-            log.warning(f"Could not resolve or copy vault BOM template: {e}")
-
-        if template_copied:
-            try:
-                # Open, update cells, and save to local output path only
-                wb = openpyxl.load_workbook(output_xlsx_path)
-                ws = wb.active
+            
+            # Open, update cells, and save to local output path only
+            wb = openpyxl.load_workbook(output_xlsx_path)
+            ws = wb.active
+            
+            width = inp.UnitWidth
+            height = inp.UnitHeight
+            
+            # 1. Update Title Block Columns (Column D, which is 4)
+            ws.cell(row=1, column=4, value=f"{result.CPN}-M")
+            ws.cell(row=2, column=4, value=datetime.datetime.now().strftime("%m/%d/%Y"))
+            ws.cell(row=4, column=4, value=f"RAD4-{width:.2f}X{height:.2f}-M-SHOP")
+            ws.cell(row=5, column=4, value='=LEFT(CPN, FIND("-M", CPN)-1)&"-M-PLOT"')
+            ws.cell(row=6, column=4, value="AI")
+            ws.cell(row=7, column=4, value="AI")
+            ws.cell(row=8, column=4, value=datetime.datetime.now().strftime("%m/%d/%Y"))
+            
+            # 2. Append option rows at the end of the table
+            row_idx = 30
+            while True:
+                val = ws.cell(row_idx, 1).value
+                if val is None:
+                    break
+                row_idx += 1
                 
-                # Calculate LED length / perimeter
-                total_perimeter_mm = 2 * (width + height) * 25.4 - 49.58223168
-                new_len = int(round(total_perimeter_mm / 50.0) * 50.0)
-                
-                # 1. Update Title Block Columns (Column C, which is 3) and clear Column D (which is 4)
-                ws.cell(row=1, column=3, value=f"{result.CPN}-M")
-                ws.cell(row=1, column=4).value = None
-                ws.cell(row=2, column=3, value=datetime.datetime.now().strftime("%m/%d/%Y"))
-                ws.cell(row=2, column=4).value = None
-                
-                if ws.cell(row=4, column=3).value:
-                    ws.cell(row=4, column=3, value=re.sub(r'\d+\.?\d*X\d+\.?\d*', f"{width:.2f}X{height:.2f}", str(ws.cell(row=4, column=3).value)))
-                ws.cell(row=4, column=4).value = None
-                ws.cell(row=5, column=4).value = None
-                if ws.cell(row=6, column=3).value:
-                    ws.cell(row=6, column=3, value=re.sub(r'\d+\.?\d*X\d+\.?\d*', f"{width:.2f}X{height:.2f}", str(ws.cell(row=6, column=3).value)))
-                ws.cell(row=6, column=4).value = None
-                    
-                ws.cell(row=7, column=3, value=result.DriverEnclosurePN)
-                ws.cell(row=7, column=4).value = None
-                ws.cell(row=8, column=3, value="AI")
-                ws.cell(row=8, column=4).value = None
-                ws.cell(row=9, column=3, value="AI")
-                ws.cell(row=9, column=4).value = None
-                ws.cell(row=10, column=3, value=datetime.datetime.now().strftime("%m/%d/%Y"))
-                ws.cell(row=10, column=4).value = None
-                
-                # 2. Update BOM Table Rows
-                row_idx = 16
-                has_clock = False
-                
-                while True:
-                    item_val = ws.cell(row_idx, 1).value
-                    # Break if we hit a blank row or non-integer row after table starts
-                    if item_val is None or not isinstance(item_val, int):
-                        break
-                        
-                    pn_val = str(ws.cell(row_idx, 2).value or "").strip()
-                    desc_val = str(ws.cell(row_idx, 3).value or "").strip()
-                    
-                    # Mirror Glass
-                    if pn_val == "63000":
-                        glass_qty = round(((width - 1.5354) * (height - 1.5354)) / 144.0, 2)
-                        ws.cell(row_idx, 4, value=glass_qty)
-                        row_idx += 1
-                        
-                    # Notched Frame (Vertical frame with N-hanger)
-                    elif "72239" in pn_val and pn_val.endswith("-N"):
-                        ws.cell(row_idx, 2, value=f"72239-XXX-{height:.2f}-N")
-                        row_idx += 1
-                        
-                    # Standard Frame (split horizontal and vertical)
-                    elif "72239" in pn_val and not pn_val.endswith("-N"):
-                        # Insert a row for vertical frame
-                        ws.insert_rows(row_idx + 1, 1)
-                        
-                        # Copy style/font from current row to the new row
-                        for col in range(1, 6):
-                            orig_cell = ws.cell(row_idx, col)
-                            new_cell = ws.cell(row_idx + 1, col)
-                            new_cell.font = openpyxl.styles.Font(name=orig_cell.font.name, size=orig_cell.font.size, bold=orig_cell.font.bold, italic=orig_cell.font.italic)
-                            new_cell.alignment = openpyxl.styles.Alignment(horizontal=orig_cell.alignment.horizontal, vertical=orig_cell.alignment.vertical)
-                            new_cell.border = openpyxl.styles.Border(left=orig_cell.border.left, right=orig_cell.border.right, top=orig_cell.border.top, bottom=orig_cell.border.bottom)
-                        
-                        # Row 1: Horizontal extrusion
-                        ws.cell(row_idx, 2, value=f"72239-XXX-{width:.2f}")
-                        ws.cell(row_idx, 3, value="ASM, EXTRUSION, RAD3, W-DIFFUSER, HORIZONTAL")
-                        ws.cell(row_idx, 4, value=2)
-                        ws.cell(row_idx, 5, value="EA.")
-                        
-                        # Row 2 (newly inserted): Vertical extrusion
-                        ws.cell(row_idx + 1, 1, value=item_val + 1)
-                        ws.cell(row_idx + 1, 2, value=f"72239-XXX-{height:.2f}")
-                        ws.cell(row_idx + 1, 3, value="ASM, EXTRUSION, RAD3, W-DIFFUSER, VERTICAL")
-                        ws.cell(row_idx + 1, 4, value=1)
-                        ws.cell(row_idx + 1, 5, value="EA.")
-                        
-                        row_idx += 2 # Skip the newly inserted row
-                        
-                    # LED Assembly
-                    elif "82180" in pn_val or "led" in desc_val.lower():
-                        ws.cell(row_idx, 2, value=f"82180-RAD3-{new_len}MM-{width:.2f}X{height:.2f}")
-                        ws.cell(row_idx, 3, value=f"ASM, LED, RAD3, {inp.Lighting}, {inp.LEDColorTemp}")
-                        row_idx += 1
-                        
-                    # Defogger Pad
-                    elif any(df_pn in pn_val for df_pn in ["15229", "15230", "15231", "15232"]) or "defogger" in desc_val.lower():
-                        if inp.Defogger:
-                            df_base = result.DefoggerConfig.split('-')[0]
-                            ws.cell(row_idx, 2, value=f"{df_base}-1")
-                            ws.cell(row_idx, 4, value=result.DefoggerQty)
-                            row_idx += 1
-                        else:
-                            ws.delete_rows(row_idx, 1)
-                            # Don't increment row_idx since rows shifted up
-                            
-                    # Clock
-                    elif "49684" in pn_val or "clock" in desc_val.lower():
-                        if inp.Clock:
-                            has_clock = True
-                            row_idx += 1
-                        else:
-                            ws.delete_rows(row_idx, 1)
-                            
-                    else:
-                        row_idx += 1
-
-                # Add Clock row if requested but not found in template
-                if inp.Clock and not has_clock:
-                    ws.insert_rows(row_idx, 1)
-                    for col in range(1, 6):
-                        orig_cell = ws.cell(row_idx - 1, col)
-                        new_cell = ws.cell(row_idx, col)
+            if inp.Defogger:
+                ws.insert_rows(row_idx, 1)
+                for col in range(1, 10):
+                    orig_cell = ws.cell(row_idx - 1, col)
+                    new_cell = ws.cell(row_idx, col)
+                    if orig_cell.font:
                         new_cell.font = openpyxl.styles.Font(name=orig_cell.font.name, size=orig_cell.font.size, bold=orig_cell.font.bold, italic=orig_cell.font.italic)
+                    if orig_cell.alignment:
                         new_cell.alignment = openpyxl.styles.Alignment(horizontal=orig_cell.alignment.horizontal, vertical=orig_cell.alignment.vertical)
+                    if orig_cell.border:
                         new_cell.border = openpyxl.styles.Border(left=orig_cell.border.left, right=orig_cell.border.right, top=orig_cell.border.top, bottom=orig_cell.border.bottom)
-                    
-                    ws.cell(row_idx, 2, value="49684")
-                    ws.cell(row_idx, 3, value="CLOCK OPTION")
-                    ws.cell(row_idx, 4, value=1)
-                    ws.cell(row_idx, 5, value="EA.")
-                    row_idx += 1
-
-                # 3. Renumber table items sequentially in Column A
-                curr_item = 1
-                for r in range(16, row_idx):
-                    ws.cell(r, 1, value=curr_item)
-                    curr_item += 1
                 
-                wb.save(output_xlsx_path)
-                log.info(f"BOM exported with template format to {output_xlsx_path}")
-                self._export_bom_to_pdf(output_xlsx_path)
-                return
-            except Exception as e:
-                log.error(f"Error customizing template BOM: {e}. Falling back to basic BOM generation.")
+                df_base = result.DefoggerConfig.split('-')[0]
+                ws.cell(row_idx, 1, value=99)
+                ws.cell(row_idx, 2, value=f"{df_base}-1")
+                ws.cell(row_idx, 4, value="DEFOGGER")
+                ws.cell(row_idx, 9, value=result.DefoggerQty)
+                row_idx += 1
+
+            # Append Driver Module
+            driver_pn = result.DriverEnclosurePN or result.BOM.get('Driver_Enclosure', '')
+            if driver_pn:
+                ws.insert_rows(row_idx, 1)
+                for col in range(1, 10):
+                    orig_cell = ws.cell(row_idx - 1, col)
+                    new_cell = ws.cell(row_idx, col)
+                    if orig_cell.font:
+                        new_cell.font = openpyxl.styles.Font(name=orig_cell.font.name, size=orig_cell.font.size, bold=orig_cell.font.bold, italic=orig_cell.font.italic)
+                    if orig_cell.alignment:
+                        new_cell.alignment = openpyxl.styles.Alignment(horizontal=orig_cell.alignment.horizontal, vertical=orig_cell.alignment.vertical)
+                    if orig_cell.border:
+                        new_cell.border = openpyxl.styles.Border(left=orig_cell.border.left, right=orig_cell.border.right, top=orig_cell.border.top, bottom=orig_cell.border.bottom)
+                
+                ws.cell(row_idx, 1, value=99)
+                ws.cell(row_idx, 2, value=driver_pn)
+                ws.cell(row_idx, 4, value="DRIVER MODULE")
+                ws.cell(row_idx, 9, value=1)
+                row_idx += 1
+
+            # Append Standoff Kit
+            standoff_pn = result.BOM.get('Standoff_Kit', '')
+            if standoff_pn:
+                ws.insert_rows(row_idx, 1)
+                for col in range(1, 10):
+                    orig_cell = ws.cell(row_idx - 1, col)
+                    new_cell = ws.cell(row_idx, col)
+                    if orig_cell.font:
+                        new_cell.font = openpyxl.styles.Font(name=orig_cell.font.name, size=orig_cell.font.size, bold=orig_cell.font.bold, italic=orig_cell.font.italic)
+                    if orig_cell.alignment:
+                        new_cell.alignment = openpyxl.styles.Alignment(horizontal=orig_cell.alignment.horizontal, vertical=orig_cell.alignment.vertical)
+                    if orig_cell.border:
+                        new_cell.border = openpyxl.styles.Border(left=orig_cell.border.left, right=orig_cell.border.right, top=orig_cell.border.top, bottom=orig_cell.border.bottom)
+                
+                ws.cell(row_idx, 1, value=99)
+                ws.cell(row_idx, 2, value=standoff_pn)
+                ws.cell(row_idx, 4, value="STANDOFF KIT")
+                ws.cell(row_idx, 9, value=1)
+                row_idx += 1
+
+
+            # 3. Clean up empty/inactive option rows in the table
+            r = 30
+            while r < row_idx:
+                item_no = ws.cell(r, 1).value
+                if item_no is None:
+                    break
+                    
+                pn_val = str(ws.cell(r, 2).value or "").strip()
+                
+                # Check if the row should be deleted because of inactive option
+                delete_row = False
+                if "SEARCH({\"CK\"}" in pn_val and not inp.Clock:
+                    delete_row = True
+                elif "SEARCH({\"KC\"" in pn_val and not (inp.Ava or inp.Keen or inp.Vive):
+                    delete_row = True
+                elif "OR(Width >= 60" in pn_val and max(width, height) < 60:
+                    delete_row = True
+                    
+                if delete_row:
+                    ws.delete_rows(r, 1)
+                    row_idx -= 1
+                else:
+                    r += 1
+
+            # 4. Renumber item numbers sequentially in Column A
+            curr_item = 1
+            for r_num in range(30, r):
+                ws.cell(r_num, 1, value=curr_item)
+                curr_item += 1
+
+            wb.save(output_xlsx_path)
+            log.info(f"BOM exported with generic template to {output_xlsx_path}")
+            self._export_bom_to_pdf(output_xlsx_path)
+            return
+        except Exception as e:
+            log.error(f"Error customizing generic BOM: {e}")
 
         # Fallback to basic BOM generation from scratch
         wb = openpyxl.Workbook()
