@@ -160,12 +160,13 @@ class SolidWorksAPI:
         log.info("Configuring custom LED strip assembly locally...")
         out_led_asm = self._configure_local_led(vault, output_dir, width, height, result.LEDPN)
 
-        # Resolve chassis template dynamically from the vault using closest size match
-        chassis_dir = Path(vault) / "Products" / "JS3" / "Assemblies" / "RAD4"
-        template_chassis = find_closest_template(chassis_dir, "RAD4-*.SLDASM", width, height, exclude_name=cpn)
+        # Load generic chassis template from repository configurator/templates/
+        template_chassis = templates_dir / "RAD4-GENERIC-CHASSIS.SLDASM"
+        
+        if not template_chassis.exists():
+            raise FileNotFoundError(f"Generic chassis template not found in {templates_dir}")
         
         # Load generic Sales Aid template drawing from repository configurator/templates/
-        templates_dir = Path(__file__).parent / "templates"
         template_drawing = templates_dir / "RAD4-GENERIC-SALES-AID.SLDDRW"
         
         if not template_drawing.exists():
