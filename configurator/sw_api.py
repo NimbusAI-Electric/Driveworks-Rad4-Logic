@@ -30,6 +30,19 @@ swSaveAsCurrentVersion = 0
 swSaveAsOptions_Silent = 1
 
 def _copy_file_writable(src: Path, dest: Path):
+    try:
+        src_abs = Path(src).resolve()
+        dest_abs = Path(dest).resolve()
+        if src_abs == dest_abs:
+            if dest_abs.exists():
+                try:
+                    os.chmod(str(dest_abs), 0o666)
+                except Exception as e:
+                    log.warning(f"Could not make destination file writable {dest_abs}: {e}")
+            return
+    except Exception as e:
+        log.warning(f"Error checking file path identity for {src} and {dest}: {e}")
+
     if dest.exists():
         try:
             os.chmod(str(dest), 0o666)
