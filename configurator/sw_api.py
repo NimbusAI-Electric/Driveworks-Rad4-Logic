@@ -411,7 +411,7 @@ class SolidWorksAPI:
                     log.info(f"Physically deleted component from mirror: {comp.Name2}")
 
             swMirror.ForceRebuild3(False)
-            swMirror.Save3(0, errors, warnings)
+            swMirror.Save3(swSaveAsOptions_Silent, errors, warnings)
             self.swApp.CloseDoc(swMirror.GetTitle)
             log.info("Mirror assembly configured and saved.")
         else:
@@ -499,7 +499,7 @@ class SolidWorksAPI:
                     log.warning(f"Chassis dimension {name} not found in assembly.")
 
             swChassis.ForceRebuild3(False)
-            swChassis.Save3(0, errors, warnings)
+            swChassis.Save3(swSaveAsOptions_Silent, errors, warnings)
             self.swApp.CloseDoc(swChassis.GetTitle)
             log.info("Chassis assembly configured and saved.")
         else:
@@ -559,7 +559,7 @@ class SolidWorksAPI:
             success_pdf = swDrawing.Extension.SaveAs(pdf_path, 0, swSaveAsOptions_Silent, export_data, errors, warnings)
             log.info(f"PDF Export status: {success_pdf} to {pdf_path}")
 
-            swDrawing.Save3(0, errors, warnings)
+            swDrawing.Save3(swSaveAsOptions_Silent, errors, warnings)
             self.swApp.CloseDoc(swDrawing.GetTitle)
             log.info("Drawing configured and saved.")
         else:
@@ -606,20 +606,20 @@ class SolidWorksAPI:
             if swPart:
                 swPart.Parameter("D1@Extrusion").SystemValue = width * 0.0254
                 swPart.ForceRebuild3(False)
-                swPart.Save3(0, errors, warnings)
+                swPart.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swPart.GetTitle)
 
             swPart = self.swApp.OpenDoc6(str(out_dif_w), swDocPART, 1, "", errors, warnings)
             if swPart:
                 swPart.Parameter("D1@Boss-Extrude1").SystemValue = width * 0.0254
                 swPart.ForceRebuild3(False)
-                swPart.Save3(0, errors, warnings)
+                swPart.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swPart.GetTitle)
 
             swAsm = self.swApp.OpenDoc6(str(out_asm_w), swDocASSEMBLY, 1, "", errors, warnings)
             if swAsm:
                 swAsm.ForceRebuild3(False)
-                swAsm.Save3(0, errors, warnings)
+                swAsm.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swAsm.GetTitle)
 
         # Height assembly & parts
@@ -639,20 +639,20 @@ class SolidWorksAPI:
             if swPart:
                 swPart.Parameter("D1@Extrusion").SystemValue = height * 0.0254
                 swPart.ForceRebuild3(False)
-                swPart.Save3(0, errors, warnings)
+                swPart.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swPart.GetTitle)
 
             swPart = self.swApp.OpenDoc6(str(out_dif_h), swDocPART, 1, "", errors, warnings)
             if swPart:
                 swPart.Parameter("D1@Boss-Extrude1").SystemValue = height * 0.0254
                 swPart.ForceRebuild3(False)
-                swPart.Save3(0, errors, warnings)
+                swPart.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swPart.GetTitle)
 
             swAsm = self.swApp.OpenDoc6(str(out_asm_h), swDocASSEMBLY, 1, "", errors, warnings)
             if swAsm:
                 swAsm.ForceRebuild3(False)
-                swAsm.Save3(0, errors, warnings)
+                swAsm.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swAsm.GetTitle)
 
         # Height N assembly & parts
@@ -673,13 +673,13 @@ class SolidWorksAPI:
             if swPart:
                 swPart.Parameter("D1@Extrusion").SystemValue = height * 0.0254
                 swPart.ForceRebuild3(False)
-                swPart.Save3(0, errors, warnings)
+                swPart.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swPart.GetTitle)
 
             swAsm = self.swApp.OpenDoc6(str(out_asm_hn), swDocASSEMBLY, 1, "", errors, warnings)
             if swAsm:
                 swAsm.ForceRebuild3(False)
-                swAsm.Save3(0, errors, warnings)
+                swAsm.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swAsm.GetTitle)
 
         return str(out_asm_w), str(out_asm_h), str(out_asm_hn)
@@ -715,13 +715,13 @@ class SolidWorksAPI:
                 swPart.Parameter("D1@MASTER SKETCH").SystemValue = width * 0.0254
                 swPart.Parameter("D2@MASTER SKETCH").SystemValue = height * 0.0254
                 swPart.ForceRebuild3(False)
-                swPart.Save3(0, errors, warnings)
+                swPart.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swPart.GetTitle)
 
             swAsm = self.swApp.OpenDoc6(str(out_led_asm), swDocASSEMBLY, 1, "", errors, warnings)
             if swAsm:
                 swAsm.ForceRebuild3(False)
-                swAsm.Save3(0, errors, warnings)
+                swAsm.Save3(swSaveAsOptions_Silent, errors, warnings)
                 self.swApp.CloseDoc(swAsm.GetTitle)
 
         return str(out_led_asm)
