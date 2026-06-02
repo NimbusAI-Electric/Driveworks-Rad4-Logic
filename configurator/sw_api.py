@@ -126,16 +126,30 @@ class SolidWorksAPI:
         except Exception as e:
             log.warning(f"Could not close open documents in SolidWorks: {e}")
 
-        # Define output directory and paths inside it (100% local, no vault writes)
+        # Define output and Vault directories
+        vault_root = Path(vault)
+        vault_mirror_dir = vault_root / "Products" / "JS3" / "Mirrors" / "RAD4"
+        vault_chassis_dir = vault_root / "Products" / "JS3" / "Assemblies" / "RAD4"
+        vault_sales_aid_dir = vault_root / "Products" / "JS3" / "Sales Aid" / "RAD4"
+
+        # Ensure Vault directories exist programmatically
+        vault_mirror_dir.mkdir(parents=True, exist_ok=True)
+        vault_chassis_dir.mkdir(parents=True, exist_ok=True)
+        vault_sales_aid_dir.mkdir(parents=True, exist_ok=True)
+
+        # Ensure output directory (N drive) exists
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        out_mirror = output_path / f"{cpn}-M.SLDASM"
-        out_skeleton = output_path / f"{cpn}-SKELETON.SLDPRT"
-        out_chassis = output_path / f"{cpn}-C.SLDASM"
-        out_drawing = output_path / f"{cpn}-SALES-AID.SLDDRW"
+        out_mirror = vault_mirror_dir / f"{cpn}-M.SLDASM"
+        out_skeleton = vault_mirror_dir / f"{cpn}-SKELETON.SLDPRT"
+        out_chassis = vault_chassis_dir / f"{cpn}-C.SLDASM"
+        out_drawing = vault_sales_aid_dir / f"{cpn}-SALES-AID.SLDDRW"
+        
+        # PDFs save to N drive (output_dir)
         pdf_path = os.path.join(output_dir, f"{cpn}-SALES-AID.PDF")
-        bom_path = os.path.join(output_dir, f"{cpn}-BOM.xlsx")
+        bom_path = os.path.join(str(vault_mirror_dir), f"{cpn}-BOM.xlsx")
+        bom_pdf_path = os.path.join(output_dir, f"{cpn}-BOM.pdf")
 
         # Local templates inside the git repository configurator/templates/
         templates_dir = Path(__file__).parent / "templates"
@@ -566,13 +580,15 @@ class SolidWorksAPI:
             raise RuntimeError(f"Failed to open drawing copy: {out_drawing}")
 
         # 7. Export BOM to Excel
-        self._export_bom(inp, result, bom_path)
+        self._export_bom(inp, result, bom_path, bom_pdf_path)
 
         return {
             "chassis_assembly": str(out_chassis),
             "mirror_assembly": str(out_mirror),
+            "sales_aid_drawing": str(out_drawing),
             "sales_aid_pdf": pdf_path,
-            "bom": bom_path
+            "bom_excel": bom_path,
+            "bom_pdf": bom_pdf_path
         }
 
     def _configure_local_extrusions(self, vault: str, output_dir: str, width: float, height: float) -> tuple[str, str, str]:
@@ -583,10 +599,14 @@ class SolidWorksAPI:
         comp_64_dir = Path(vault) / "COMPONENTS" / "64000"
         comp_64_js3_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "64000"
 
+        # Ensure Vault directories exist programmatically
+        comp_72_dir.mkdir(parents=True, exist_ok=True)
+        comp_64_js3_dir.mkdir(parents=True, exist_ok=True)
+
         # Width assembly & parts
-        out_alu_w = Path(output_dir) / f"72239-{width:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
-        out_dif_w = Path(output_dir) / f"64792-{width:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-        out_asm_w = Path(output_dir) / f"72239-XXX-{width:.2f}.SLDASM"
+        out_alu_w = comp_72_dir / f"72239-{width:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
+        out_dif_w = comp_64_js3_dir / f"64792-{width:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+        out_asm_w = comp_72_dir / f"72239-XXX-{width:.2f}.SLDASM"
 
         temp_alu_w = comp_72_dir / "72239-36.00-EXTRUSION-ALUMINUM.SLDPRT"
         temp_dif_w = comp_64_js3_dir / "64792-36.00-EXTRUSION-DIFFUSER.SLDPRT"
@@ -623,9 +643,9 @@ class SolidWorksAPI:
                 self.swApp.CloseDoc(swAsm.GetTitle)
 
         # Height assembly & parts
-        out_alu_h = Path(output_dir) / f"72239-{height:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
-        out_dif_h = Path(output_dir) / f"64792-{height:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-        out_asm_h = Path(output_dir) / f"72239-XXX-{height:.2f}.SLDASM"
+        out_alu_h = comp_72_dir / f"72239-{height:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
+        out_dif_h = comp_64_js3_dir / f"64792-{height:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+        out_asm_h = comp_72_dir / f"72239-XXX-{height:.2f}.SLDASM"
 
         if not out_asm_h.exists() or not out_alu_h.exists():
             _copy_file_writable(temp_alu_w, out_alu_h)
@@ -656,8 +676,8 @@ class SolidWorksAPI:
                 self.swApp.CloseDoc(swAsm.GetTitle)
 
         # Height N assembly & parts
-        out_alu_hn = Path(output_dir) / f"72239-{height:.2f}-N-EXTRUSION-ALUMINUM.SLDPRT"
-        out_asm_hn = Path(output_dir) / f"72239-XXX-{height:.2f}-N.SLDASM"
+        out_alu_hn = comp_72_dir / f"72239-{height:.2f}-N-EXTRUSION-ALUMINUM.SLDPRT"
+        out_asm_hn = comp_72_dir / f"72239-XXX-{height:.2f}-N.SLDASM"
 
         temp_alu_hn = comp_72_dir / "72239-36.00-N-EXTRUSION-ALUMINUM.SLDPRT"
         temp_asm_hn = comp_72_dir / "72239-XXX-36.00-N.SLDASM"
@@ -691,12 +711,16 @@ class SolidWorksAPI:
         comp_82_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "82000"
         comp_led_parts_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "RAD4 LEDs"
 
+        # Ensure Vault directories exist programmatically
+        comp_82_dir.mkdir(parents=True, exist_ok=True)
+        comp_led_parts_dir.mkdir(parents=True, exist_ok=True)
+
         # Compute physical perimeter to determine standard round length
         total_perimeter_mm = 2 * (width + height) * 25.4 - 49.58223168
         new_len = int(round(total_perimeter_mm / 50.0) * 50.0)
 
-        out_led_part = Path(output_dir) / f"RAD3-LED-{new_len}-{width:.2f}X{height:.2f}.SLDPRT"
-        out_led_asm = Path(output_dir) / f"82180-RAD3-{new_len}MM-{width:.2f}X{height:.2f}.SLDASM"
+        out_led_part = comp_led_parts_dir / f"RAD3-LED-{new_len}-{width:.2f}X{height:.2f}.SLDPRT"
+        out_led_asm = comp_82_dir / f"82180-RAD3-{new_len}MM-{width:.2f}X{height:.2f}.SLDASM"
 
         # Templates
         temp_led_part = comp_led_parts_dir / "RAD3-LED-3600-36.00X36.00.SLDPRT"
@@ -736,7 +760,7 @@ class SolidWorksAPI:
             mgr.Add3(key, 30, str(val), 1)
             mgr.Set2(key, str(val))
 
-    def _export_bom(self, inp: RAD4Inputs, result: RAD4Result, output_xlsx_path: str):
+    def _export_bom(self, inp: RAD4Inputs, result: RAD4Result, output_xlsx_path: str, output_pdf_path: str):
         try:
             import openpyxl
             import datetime
@@ -873,7 +897,7 @@ class SolidWorksAPI:
 
             wb.save(output_xlsx_path)
             log.info(f"BOM exported with generic template to {output_xlsx_path}")
-            self._export_bom_to_pdf(output_xlsx_path)
+            self._export_bom_to_pdf(output_xlsx_path, output_pdf_path)
             return
         except Exception as e:
             log.error(f"Error customizing generic BOM: {e}")
@@ -910,9 +934,9 @@ class SolidWorksAPI:
         # Save to local output target only
         wb.save(output_xlsx_path)
         log.info(f"BOM exported (fallback) to: {output_xlsx_path}")
-        self._export_bom_to_pdf(output_xlsx_path)
+        self._export_bom_to_pdf(output_xlsx_path, output_pdf_path)
 
-    def _export_bom_to_pdf(self, bom_xlsx_path: str):
+    def _export_bom_to_pdf(self, bom_xlsx_path: str, output_pdf_path: str):
         try:
             import win32com.client
             import pythoncom
@@ -925,7 +949,7 @@ class SolidWorksAPI:
             excel.DisplayAlerts = False
             
             abs_xlsx = os.path.abspath(bom_xlsx_path)
-            abs_pdf = abs_xlsx.replace(".xlsx", ".pdf")
+            abs_pdf = os.path.abspath(output_pdf_path)
             
             wb = excel.Workbooks.Open(abs_xlsx)
             wb.ExportAsFixedFormat(0, abs_pdf)
