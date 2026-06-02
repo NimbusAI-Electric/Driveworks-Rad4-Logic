@@ -23,6 +23,7 @@ from rad4_engine import RAD4Inputs, RAD4Result, DWConstantVault
 log = logging.getLogger(__name__)
 
 # COM Constants
+swDocPART = 1
 swDocASSEMBLY = 2
 swDocDRAWING = 3
 swSaveAsCurrentVersion = 0
