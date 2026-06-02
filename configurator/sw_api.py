@@ -116,7 +116,7 @@ class SolidWorksAPI:
         cpn = result.CPN
         vault = DWConstantVault
 
-        log.info(f"Starting programmatic generation for: {cpn}")
+        log.info(f"Starting programmatic generative configuration for: {cpn}")
 
         # Close all active documents to release file locks before copying
         try:
@@ -125,176 +125,52 @@ class SolidWorksAPI:
         except Exception as e:
             log.warning(f"Could not close open documents in SolidWorks: {e}")
 
-        # 1. Resolve template paths dynamically using closest size match
+        # Define output directory and paths inside it (100% local, no vault writes)
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        out_mirror = output_path / f"{cpn}-M.SLDASM"
+        out_skeleton = output_path / f"{cpn}-SKELETON.SLDPRT"
+        out_chassis = output_path / f"{cpn}-C.SLDASM"
+        out_drawing = output_path / f"{cpn}-SALES-AID.SLDDRW"
+        pdf_path = os.path.join(output_dir, f"{cpn}-SALES-AID.PDF")
+        bom_path = os.path.join(output_dir, f"{cpn}-BOM.xlsx")
+
+        # Local templates inside the git repository configurator/templates/
+        templates_dir = Path(__file__).parent / "templates"
+        template_skeleton = templates_dir / "RAD4-SKELETON.SLDPRT"
+        template_asm = templates_dir / "RAD4-MASTER-ASSEMBLY.SLDASM"
+
+        if not template_skeleton.exists() or not template_asm.exists():
+            raise FileNotFoundError(f"Local configurator templates not found in {templates_dir}")
+
+        log.info(f"Copying master skeleton and assembly templates...")
+        _copy_file_writable(template_skeleton, out_skeleton)
+        _copy_file_writable(template_asm, out_mirror)
+
+        log.info("Updating skeleton reference in the mirror assembly...")
+        success_ref = self.swApp.ReplaceReferencedDocument(str(out_mirror), str(template_skeleton), str(out_skeleton))
+        log.info(f"ReplaceReferencedDocument (Mirror -> Skeleton) status: {success_ref}")
+
+        # Configure custom frame extrusions and diffuser parts locally in output_dir
+        log.info("Configuring custom frame extrusions locally...")
+        out_asm_w, out_asm_h, out_asm_hn = self._configure_local_extrusions(vault, output_dir, width, height)
+
+        # Configure custom LED strip locally in output_dir
+        log.info("Configuring custom LED strip assembly locally...")
+        out_led_asm = self._configure_local_led(vault, output_dir, width, height, result.LEDPN)
+
+        # Resolve chassis and drawing templates dynamically from the vault using closest size match
         chassis_dir = Path(vault) / "Products" / "JS3" / "Assemblies" / "RAD4"
-        mirror_dir = Path(vault) / "Products" / "JS3" / "Mirrors" / "RAD4"
         drawing_dir = chassis_dir
 
         template_chassis = find_closest_template(chassis_dir, "RAD4-*.SLDASM", width, height, exclude_name=cpn)
-        template_mirror = find_closest_template(mirror_dir, "RAD4-*-M.SLDASM", width, height, exclude_name=cpn)
         template_drawing = find_closest_template(drawing_dir, "RAD4-*-SALES-AID.SLDDRW", width, height, exclude_name=cpn)
 
-        # Parse standard sizes from selected templates
-        m_chassis = re.search(r'RAD4-(\d+\.\d+)X(\d+\.\d+)', template_chassis.name)
-        temp_w = float(m_chassis.group(1)) if m_chassis else width
-        temp_h = float(m_chassis.group(2)) if m_chassis else height
-
-        # Fallback if option-heavy mirror template is missing in the vault
-        if not template_mirror.exists():
-            log.warning(f"Mirror template {template_mirror} does not exist. Finding fallback...")
-            fallback_pattern = f"RAD4-{temp_w:.2f}X{temp_h:.2f}-*.SLDASM"
-            fallbacks = list(mirror_dir.glob(fallback_pattern))
-            def _is_gen(n):
-                nu = n.upper()
-                return (any(t in nu for t in ["-RM-", "-SM-", "-LO-", "-SO-", "-LSE-", "-LHE-"]) or
-                        re.search(r'-(BK|NK|CH|BN|BR|BZ|GU|WH)\d{2}', nu) or
-                        re.search(r'-\d{2}K', nu))
-            fallbacks = [f for f in fallbacks if f.exists() and not _is_gen(f.name)]
-            if fallbacks:
-                fallbacks.sort(key=lambda f: len(f.name))
-                template_mirror = fallbacks[0]
-                log.info(f"Fallback mirror template resolved: {template_mirror}")
-            else:
-                template_mirror = find_closest_template(mirror_dir, "RAD4-*-M.SLDASM", width, height, exclude_name=cpn)
-                log.info(f"Fallback closest mirror template resolved: {template_mirror}")
-
-        log.info(f"Templates resolved:\n  Chassis: {template_chassis}\n  Mirror: {template_mirror}\n  Drawing: {template_drawing}")
-
-        # 2. Build custom extrusion parts/sub-assemblies if size is custom/decimal
-        self._configure_custom_extrusions(vault, temp_w, temp_h, width, height)
-
-        # 3. Define output copy paths
-        out_mirror = mirror_dir / f"{cpn}-M.SLDASM"
-        out_chassis = chassis_dir / f"{cpn}-C.SLDASM"
-        out_drawing = Path(vault) / "Products" / "JS3" / "Sales Aid" / "RAD4" / f"{cpn}-SALES-AID.SLDDRW"
-        
-        # Ensure output directories exist
-        out_drawing.parent.mkdir(parents=True, exist_ok=True)
-
-        # 4. Copy templates to output paths
-        log.info("Copying template files...")
-        _copy_file_writable(template_mirror, out_mirror)
+        log.info(f"Copying chassis and drawing templates from vault...")
         _copy_file_writable(template_chassis, out_chassis)
         _copy_file_writable(template_drawing, out_drawing)
-        log.info("Files copied successfully.")
 
-        # 5. Replace Referenced Documents using COM API (needs files closed!)
-        log.info("Updating references...")
-        
-        # In Mirror copy: Redirect horizontal & vertical extrusion sub-assemblies to the custom-sized versions
-        comp_72_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "72000"
-        is_custom_w = abs(width - temp_w) > 0.001
-        is_custom_h = abs(height - temp_h) > 0.001
-
-        if is_custom_w:
-            ref_asm_w_temp = str(comp_72_dir / f"72239-XXX-{temp_w:.2f}.SLDASM")
-            ref_asm_w_out = str(comp_72_dir / f"72239-XXX-{width:.2f}.SLDASM")
-            if os.path.exists(ref_asm_w_out):
-                success_ref = self.swApp.ReplaceReferencedDocument(str(out_mirror), ref_asm_w_temp, ref_asm_w_out)
-                log.info(f"ReplaceReferencedDocument in Mirror (W Extrusion Asm) replacing {ref_asm_w_temp} with {ref_asm_w_out}: {success_ref}")
-
-        if is_custom_h:
-            # Replace vertical assembly with hole connector
-            ref_asm_hn_temp = str(comp_72_dir / f"72239-XXX-{temp_h:.2f}-N.SLDASM")
-            ref_asm_hn_out = str(comp_72_dir / f"72239-XXX-{height:.2f}-N.SLDASM")
-            if os.path.exists(ref_asm_hn_out):
-                success_ref = self.swApp.ReplaceReferencedDocument(str(out_mirror), ref_asm_hn_temp, ref_asm_hn_out)
-                log.info(f"ReplaceReferencedDocument in Mirror (H Extrusion Asm N) replacing {ref_asm_hn_temp} with {ref_asm_hn_out}: {success_ref}")
-
-            # Replace standard height assembly
-            ref_asm_h_temp = str(comp_72_dir / f"72239-XXX-{temp_h:.2f}.SLDASM")
-            ref_asm_h_out = str(comp_72_dir / f"72239-XXX-{height:.2f}.SLDASM")
-            if os.path.exists(ref_asm_h_out):
-                success_ref = self.swApp.ReplaceReferencedDocument(str(out_mirror), ref_asm_h_temp, ref_asm_h_out)
-                log.info(f"ReplaceReferencedDocument in Mirror (H Extrusion Asm) replacing {ref_asm_h_temp} with {ref_asm_h_out}: {success_ref}")
-
-        # LED Customization (replace reference in Mirror copy)
-        # 1. Briefly open template mirror to locate the template LED sub-assembly path
-        errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-        warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-        temp_led_asm_path = None
-        log.info(f"Opening template mirror briefly to locate LED sub-assembly: {template_mirror}")
-        swTempMirror = self.swApp.OpenDoc6(str(template_mirror), swDocASSEMBLY, 1, "", errors, warnings)
-        if swTempMirror:
-            try:
-                components = swTempMirror.GetComponents(True)
-                for comp in components:
-                    c_path = comp.GetPathName
-                    if r"products\js3\components\82000" in c_path.lower() and c_path.lower().endswith(".sldasm"):
-                        temp_led_asm_path = c_path
-                        break
-            except Exception as e:
-                log.warning(f"Error reading components from template mirror: {e}")
-            finally:
-                self.swApp.CloseDoc(swTempMirror.GetTitle)
-
-        if temp_led_asm_path:
-            filename = os.path.basename(temp_led_asm_path)
-            # Match e.g. 82181-RAD3-6050MM-84.00X36.00.SLDASM
-            match = re.search(r'(\d+)-(RAD\d)-(\d+)MM-(\d+\.\d+)X(\d+\.\d+)\.SLDASM', filename, re.IGNORECASE)
-            if match:
-                temp_led_pn = match.group(1)
-                temp_rad_ver = match.group(2)
-                temp_len = match.group(3)
-                temp_w_led = float(match.group(4))
-                temp_h_led = float(match.group(5))
-                
-                target_led_pn = result.LEDPN
-                
-                # Compute physical perimeter to determine standard round length
-                total_perimeter_mm = 2 * (width + height) * 25.4 - 49.58223168
-                new_len = int(round(total_perimeter_mm / 50.0) * 50.0)
-                
-                # Check if replacement is needed (mismatched size or mismatched part number)
-                needs_led_replace = (abs(width - temp_w_led) > 0.001 or 
-                                     abs(height - temp_h_led) > 0.001 or 
-                                     target_led_pn != temp_led_pn)
-                
-                if needs_led_replace:
-                    new_sub_name = f"{target_led_pn}-{temp_rad_ver}-{new_len}MM-{width:.2f}X{height:.2f}.SLDASM"
-                    new_sub_path = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "82000" / new_sub_name
-                    
-                    new_part_name = f"{temp_rad_ver}-LED-{new_len}-{width:.2f}X{height:.2f}.SLDPRT"
-                    new_part_path = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "RAD4 LEDs" / new_part_name
-                    
-                    temp_part_name = f"{temp_rad_ver}-LED-{temp_len}-{temp_w_led:.2f}X{temp_h_led:.2f}.SLDPRT"
-                    temp_part_path = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "RAD4 LEDs" / temp_part_name
-                    
-                    if not new_sub_path.exists() or not new_part_path.exists():
-                        log.info(f"Creating custom LED components since they do not exist: {new_sub_name}")
-                        if not new_part_path.exists() and temp_part_path.exists():
-                            _copy_file_writable(temp_part_path, new_part_path)
-                            log.info(f"Configuring new LED part dimensions: {new_part_path}")
-                            swPart = self.swApp.OpenDoc6(str(new_part_path), 1, 1, "", errors, warnings)
-                            if swPart:
-                                dim_d1 = swPart.Parameter("D1@MASTER SKETCH")
-                                dim_d2 = swPart.Parameter("D2@MASTER SKETCH")
-                                if dim_d1:
-                                    dim_d1.SystemValue = width * 0.0254
-                                if dim_d2:
-                                    dim_d2.SystemValue = height * 0.0254
-                                swPart.ForceRebuild3(False)
-                                swPart.Save3(0, errors, warnings)
-                                self.swApp.CloseDoc(swPart.GetTitle)
-                        
-                        if not new_sub_path.exists() and os.path.exists(temp_led_asm_path):
-                            _copy_file_writable(Path(temp_led_asm_path), new_sub_path)
-                            log.info(f"Replacing reference in new LED sub-assembly: {new_sub_path}")
-                            self.swApp.ReplaceReferencedDocument(str(new_sub_path), str(temp_part_path), str(new_part_path))
-                            # Open, rebuild, and save new sub-assembly
-                            swAsm = self.swApp.OpenDoc6(str(new_sub_path), 2, 1, "", errors, warnings)
-                            if swAsm:
-                                swAsm.ForceRebuild3(False)
-                                swAsm.Save3(0, errors, warnings)
-                                self.swApp.CloseDoc(swAsm.GetTitle)
-                    
-                    # Replace in mirror assembly copy
-                    ref_asm_temp = str(temp_led_asm_path)
-                    ref_asm_out = str(new_sub_path)
-                    success_ref = self.swApp.ReplaceReferencedDocument(str(out_mirror), ref_asm_temp, ref_asm_out)
-                    log.info(f"ReplaceReferencedDocument in Mirror (LED Asm) replacing {ref_asm_temp} with {ref_asm_out}: {success_ref}")
-
-        
         # Replace mirror in chassis copy
         ref_mirror_temp = None
         deps = self.swApp.GetDocumentDependencies2(str(out_chassis), True, True, False)
@@ -307,12 +183,16 @@ class SolidWorksAPI:
                         ref_mirror_temp = dep_path
                         break
         if not ref_mirror_temp:
+            m_chassis = re.search(r'RAD4-(\d+\.\d+)X(\d+\.\d+)', template_chassis.name)
+            temp_w = float(m_chassis.group(1)) if m_chassis else width
+            temp_h = float(m_chassis.group(2)) if m_chassis else height
+            mirror_dir = Path(vault) / "Products" / "JS3" / "Mirrors" / "RAD4"
             ref_mirror_temp = str(mirror_dir / f"RAD4-{temp_w:.2f}X{temp_h:.2f}-M.SLDASM")
-            
+
         success = self.swApp.ReplaceReferencedDocument(str(out_chassis), str(ref_mirror_temp), str(out_mirror))
         log.info(f"ReplaceReferencedDocument (Chassis -> Mirror) replacing {ref_mirror_temp} with {out_mirror}: {success}")
 
-        # Replace chassis in drawing copy (checking all possible template variant chassis names)
+        # Replace chassis in drawing copy
         m_drawing = re.search(r'RAD4-(\d+\.\d+)X(\d+\.\d+)', template_drawing.name)
         temp_w_d = float(m_drawing.group(1)) if m_drawing else width
         temp_h_d = float(m_drawing.group(2)) if m_drawing else height
@@ -331,25 +211,40 @@ class SolidWorksAPI:
         if not replaced:
             log.warning("Could not automatically replace chassis reference in drawing.")
 
-        # 6. Open and configure copies in SolidWorks
         errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
         warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
 
-        # A. Configure Mirror Assembly
+        # A. Open and configure Mirror Assembly (Decoupled generative frame replacement)
         log.info(f"Opening Mirror copy: {out_mirror}")
         swMirror = self.swApp.OpenDoc6(str(out_mirror), swDocASSEMBLY, 1, "", errors, warnings)
         if swMirror:
-            # Activate document to allow component additions and configurations
             self.swApp.ActivateDoc3(swMirror.GetTitle, True, 2, errors)
             
-            mirror_props = {
-                "PartNumber": cpn + "-M",
-                "Width": f"{width:.2f}",
-                "Height": f"{height:.2f}",
-            }
-            self._set_custom_properties(swMirror, mirror_props)
+            # 1. Drive skeleton dimensions
+            skeleton_comp = None
+            components = swMirror.GetComponents(True)
+            for comp in components:
+                if "skeleton" in comp.Name2.lower():
+                    skeleton_comp = comp
+                    break
 
-            # Update size dimensions for planes and glass cut sketch
+            if skeleton_comp:
+                skeleton_model = skeleton_comp.GetModelDoc2
+                if skeleton_model:
+                    dim_w = skeleton_model.Parameter("Width@SkeletonSketch")
+                    dim_h = skeleton_model.Parameter("Height@SkeletonSketch")
+                    if dim_w:
+                        dim_w.SystemValue = width * 0.0254
+                    if dim_h:
+                        dim_h.SystemValue = height * 0.0254
+                    skeleton_model.ForceRebuild3(False)
+                    log.info(f"Driven skeleton sketch size to {width} x {height} inches")
+                else:
+                    log.warning("Could not get skeleton model document")
+            else:
+                log.warning("Skeleton component not found in assembly")
+
+            # 2. Drive assembly offset planes and glass sketch
             mirror_dims = {
                 "D1@LEFT": (width / 2.0) * 0.0254,
                 "D1@RIGHT": (width / 2.0) * 0.0254,
@@ -362,50 +257,95 @@ class SolidWorksAPI:
                 dim = swMirror.Parameter(name)
                 if dim:
                     dim.SystemValue = val
-                    log.info(f"Updated mirror dimension {name} to {val / 0.0254:.4f} in")
                 else:
-                    log.warning(f"Mirror dimension {name} not found in assembly.")
-            
+                    log.warning(f"Mirror parameter {name} not found.")
+
+            # 3. Decouple and replace frame and LED components using selection-based ReplaceComponents2
+            swAssy = swMirror
+            for comp in components:
+                name = comp.Name2
+                path = comp.GetPathName.lower()
+                
+                # Check for 72239 extrusion subassembly
+                if "72239-xxx" in path:
+                    trans = comp.Transform2
+                    if trans:
+                        data = trans.ArrayData
+                        x_pos = data[9]
+                        y_pos = data[10]
+                        is_horizontal = abs(y_pos) > abs(x_pos)
+                    else:
+                        is_horizontal = True
+                        
+                    is_n = "72239-xxx-36.00-n" in path
+                    
+                    if is_horizontal:
+                        replacement_path = out_asm_w
+                    else:
+                        if is_n:
+                            replacement_path = out_asm_hn
+                        else:
+                            replacement_path = out_asm_h
+                            
+                    log.info(f"Replacing frame instance {name} with {os.path.basename(replacement_path)}...")
+                    swMirror.ClearSelection2(True)
+                    comp.Select2(False, 0)
+                    success = swAssy.ReplaceComponents2(replacement_path, "Default", False, 2, True)
+                    log.info(f"  ReplaceComponents2 status: {success}")
+
+                # Check for LED subassembly
+                elif "82000" in path or "82180" in path:
+                    log.info(f"Replacing LED instance {name} with {os.path.basename(out_led_asm)}...")
+                    swMirror.ClearSelection2(True)
+                    comp.Select2(False, 0)
+                    success = swAssy.ReplaceComponents2(out_led_asm, "Default", False, 2, True)
+                    log.info(f"  ReplaceComponents2 status: {success}")
+
+            # Set mirror properties
+            mirror_props = {
+                "PartNumber": cpn + "-M",
+                "Width": f"{width:.2f}",
+                "Height": f"{height:.2f}",
+            }
+            self._set_custom_properties(swMirror, mirror_props)
+
             # Traverse and configure/suppress/delete option-specific components in mirror
-            components = swMirror.GetComponents(True)
             button_needed = inp.Ava or inp.Keen or inp.Vive
             to_delete = []
-            
-            # Keep track of clock and defogger components present
             clock_comps = []
             defogger_comps = []
             
-            if components:
-                for comp in components:
-                    c_path = comp.GetPathName.lower()
-                    c_name = comp.Name2
-                    
-                    if "js3-ava-keen-vive-1-button-assembly" in c_path:
-                        if not button_needed:
-                            to_delete.append(comp)
-                        else:
-                            comp.SetSuppression2(2)  # 2 = FullyResolved
-                            # Determine configuration
-                            button_config = None
-                            if inp.Ava:
-                                button_config = f"64167-{inp.DimmingType}"
-                            elif inp.Keen:
-                                if result.DriverQty < 2:
-                                    button_config = f"61857-{inp.DimmingType}"
-                                else:
-                                    button_config = f"61857-{inp.DimmingType}-2"
-                            elif inp.Vive:
-                                button_config = "83047"
-                                
-                            if button_config:
-                                comp.ReferencedConfiguration = button_config
-                                log.info(f"Resolved button assembly and set configuration to: {button_config}")
+            # Re-read components after replacements
+            components = swMirror.GetComponents(True)
+            for comp in components:
+                c_path = comp.GetPathName.lower()
+                c_name = comp.Name2
+                
+                if "js3-ava-keen-vive-1-button-assembly" in c_path:
+                    if not button_needed:
+                        to_delete.append(comp)
+                    else:
+                        comp.SetSuppression2(2)  # 2 = FullyResolved
+                        button_config = None
+                        if inp.Ava:
+                            button_config = f"64167-{inp.DimmingType}"
+                        elif inp.Keen:
+                            if result.DriverQty < 2:
+                                button_config = f"61857-{inp.DimmingType}"
+                            else:
+                                button_config = f"61857-{inp.DimmingType}-2"
+                        elif inp.Vive:
+                            button_config = "83047"
+                            
+                        if button_config:
+                            comp.ReferencedConfiguration = button_config
+                            log.info(f"Resolved button assembly and set configuration to: {button_config}")
 
-                    elif "clock option-mirror" in c_path or "clock option-mirror" in c_name.lower():
-                        clock_comps.append(comp)
-                        
-                    elif "defogger-js" in c_path or "defogger-js" in c_name.lower():
-                        defogger_comps.append(comp)
+                elif "clock option-mirror" in c_path or "clock option-mirror" in c_name.lower():
+                    clock_comps.append(comp)
+                    
+                elif "defogger-js" in c_path or "defogger-js" in c_name.lower():
+                    defogger_comps.append(comp)
 
             # Assert Clock component state
             clock_path = str(Path(vault) / "COMPONENTS" / "STANDARD PARTS" / "CLOCK OPTION" / "CLOCK OPTION-MIRROR.sldasm")
@@ -419,13 +359,10 @@ class SolidWorksAPI:
                 else:
                     log.info("Adding missing clock component programmatically...")
                     try:
-                        # Pre-open the clock component document so AddComponent4 resolves it
-                        self.swApp.OpenDoc6(clock_path, 2, 1, "", errors, warnings) # 2 = swDocASSEMBLY
+                        self.swApp.OpenDoc6(clock_path, 2, 1, "", errors, warnings)
                         comp = swMirror.AddComponent4(clock_path, clock_config, 0.0, 0.0, 0.0)
                         if comp:
                             log.info(f"Successfully added clock: {comp.Name2} | Config: {comp.ReferencedConfiguration}")
-                        else:
-                            log.warning("Failed to add clock component via AddComponent4.")
                     except Exception as e:
                         log.error(f"Error adding clock component: {e}")
             else:
@@ -438,30 +375,24 @@ class SolidWorksAPI:
                 defogger_config = result.DefoggerConfig
                 defogger_qty = result.DefoggerQty
                 
-                # Configure existing defoggers
                 for comp in defogger_comps[:defogger_qty]:
                     comp.SetSuppression2(2)
                     comp.ReferencedConfiguration = defogger_config
                     log.info(f"Configured existing defogger component: {comp.Name2} with {defogger_config}")
                     
-                # Delete excess defoggers if any
                 if len(defogger_comps) > defogger_qty:
                     for comp in defogger_comps[defogger_qty:]:
                         to_delete.append(comp)
                         
-                # Add missing defoggers
                 curr_count = len(defogger_comps)
                 if curr_count < defogger_qty:
-                    # Pre-open the defogger component document so AddComponent4 resolves it
-                    self.swApp.OpenDoc6(defogger_path, 1, 1, "", errors, warnings) # 1 = swDocPART
+                    self.swApp.OpenDoc6(defogger_path, 1, 1, "", errors, warnings)
                 while curr_count < defogger_qty:
                     log.info(f"Adding missing defogger component {curr_count + 1} of {defogger_qty}...")
                     try:
                         comp = swMirror.AddComponent4(defogger_path, defogger_config, 0.0, 0.0, 0.0)
                         if comp:
                             log.info(f"Successfully added defogger: {comp.Name2} | Config: {comp.ReferencedConfiguration}")
-                        else:
-                            log.warning("Failed to add defogger component via AddComponent4.")
                     except Exception as e:
                         log.error(f"Error adding defogger component: {e}")
                     curr_count += 1
@@ -476,7 +407,6 @@ class SolidWorksAPI:
                     swMirror.EditDelete()
                     log.info(f"Physically deleted component from mirror: {comp.Name2}")
 
-
             swMirror.ForceRebuild3(False)
             swMirror.Save3(0, errors, warnings)
             self.swApp.CloseDoc(swMirror.GetTitle)
@@ -484,11 +414,10 @@ class SolidWorksAPI:
         else:
             raise RuntimeError(f"Failed to open mirror assembly copy: {out_mirror}")
 
-        # B. Configure Chassis Assembly
+        # B. Open and configure Chassis Assembly
         log.info(f"Opening Chassis copy: {out_chassis}")
         swChassis = self.swApp.OpenDoc6(str(out_chassis), swDocASSEMBLY, 1, "", errors, warnings)
         if swChassis:
-            # Activate document to allow subassembly traversal and component modifications
             self.swApp.ActivateDoc3(swChassis.GetTitle, True, 2, errors)
             
             # Set driver configuration
@@ -505,11 +434,10 @@ class SolidWorksAPI:
             if not driver_found:
                 log.warning("Driver module component not found in Chassis assembly!")
             else:
-                # Force rebuild so SolidWorks instantiates components of the new driver configuration
                 swChassis.ForceRebuild3(False)
 
             # Traverse recursively to configure chassis clock & defogger wires
-            all_chassis_comps = swChassis.GetComponents(False)  # False = recursive traversal
+            all_chassis_comps = swChassis.GetComponents(False)
             if all_chassis_comps:
                 for comp in all_chassis_comps:
                     comp_path = comp.GetPathName.lower()
@@ -517,22 +445,21 @@ class SolidWorksAPI:
                     
                     if "clock option-chassis" in comp_path or "clock option-chassis" in comp_name:
                         if inp.Clock and inp.ClockType in ["CK1", "CK2"]:
-                            res = comp.SetSuppression2(2)  # Fully resolved
+                            comp.SetSuppression2(2)
                             clock_wire_config = f"{inp.ClockType} SHORT WIRES"
                             comp.ReferencedConfiguration = clock_wire_config
-                            log.info(f"Unsuppressed clock wire harness: {comp_name} (res: {res}, suppressed after: {comp.IsSuppressed}) and set config to: {clock_wire_config}")
+                            log.info(f"Unsuppressed clock wire harness: {comp_name} and set config to: {clock_wire_config}")
                         else:
-                            res = comp.SetSuppression2(0)  # Suppressed
-                            log.info(f"Suppressed clock wire harness component in chassis (res: {res}, suppressed after: {comp.IsSuppressed}).")
+                            comp.SetSuppression2(0)
+                            log.info(f"Suppressed clock wire harness component in chassis.")
                             
                     elif "74826-harness-wire-defogger-driver-box" in comp_path or "74826-harness-wire-defogger-driver-box" in comp_name:
                         if inp.Defogger:
-                            res = comp.SetSuppression2(2)  # Fully resolved
-                            log.info(f"Unsuppressed defogger wire harness in chassis driver box (res: {res}, suppressed after: {comp.IsSuppressed}).")
+                            comp.SetSuppression2(2)
+                            log.info(f"Unsuppressed defogger wire harness in chassis driver box.")
                         else:
-                            res = comp.SetSuppression2(0)  # Suppressed
-                            log.info(f"Suppressed defogger wire harness in chassis driver box (res: {res}, suppressed after: {comp.IsSuppressed}).")
-
+                            comp.SetSuppression2(0)
+                            log.info(f"Suppressed defogger wire harness in chassis driver box.")
 
             chassis_props = {
                 "PartNumber": cpn + "-C",
@@ -579,7 +506,6 @@ class SolidWorksAPI:
         log.info(f"Opening Drawing copy: {out_drawing}")
         swDrawing = self.swApp.OpenDoc6(str(out_drawing), swDocDRAWING, 1, "", errors, warnings)
         if swDrawing:
-            # Update drawing custom properties
             FINISH_MAP = {
                 "BK": "MATTE BLACK", "BK05": "MATTE BLACK",
                 "NK": "ETCHED NICKEL", "NK04": "ETCHED NICKEL",
@@ -597,8 +523,6 @@ class SolidWorksAPI:
             except Exception:
                 cct_str = inp.LEDColorTemp
 
-            # Lumens calculation: round(Length_In * LM_FT / 12.0)
-            # Default to 302 LM/FT for LO/LSE.
             lm_ft = 302.0
             total_lumens = round(result.LEDCutLengthIn * lm_ft / 12.0)
             
@@ -616,7 +540,7 @@ class SolidWorksAPI:
             self._set_custom_properties(swDrawing, drawing_props)
             log.info("Drawing custom properties set successfully.")
 
-            # Run Option A dynamic notes update and suppression
+            # Option A dynamic notes update and suppression
             try:
                 self._update_drawing_notes_option_a(swDrawing, inp, result)
             except Exception as e:
@@ -628,7 +552,6 @@ class SolidWorksAPI:
 
             # Export to PDF in target output directory
             os.makedirs(output_dir, exist_ok=True)
-            pdf_path = os.path.join(output_dir, f"{cpn}-SALES-AID.PDF")
             export_data = self.swApp.GetExportFileData(1) # 1 = swExportPdfData
             success_pdf = swDrawing.Extension.SaveAs(pdf_path, 0, swSaveAsOptions_Silent, export_data, errors, warnings)
             log.info(f"PDF Export status: {success_pdf} to {pdf_path}")
@@ -640,7 +563,6 @@ class SolidWorksAPI:
             raise RuntimeError(f"Failed to open drawing copy: {out_drawing}")
 
         # 7. Export BOM to Excel
-        bom_path = os.path.join(output_dir, f"{cpn}-BOM.xlsx")
         self._export_bom(result, bom_path)
 
         return {
@@ -650,174 +572,160 @@ class SolidWorksAPI:
             "bom": bom_path
         }
 
-    def _configure_custom_extrusions(self, vault: str, temp_w: float, temp_h: float, width: float, height: float):
-        """
-        Creates custom size extrusion parts and sub-assemblies, opens them to set
-        their extrusion length dimensions, and updates sub-assembly file references.
-        """
+    def _configure_local_extrusions(self, vault: str, output_dir: str, width: float, height: float) -> tuple[str, str, str]:
+        errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+
         comp_72_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "72000"
         comp_64_dir = Path(vault) / "COMPONENTS" / "64000"
         comp_64_js3_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "64000"
 
-        is_custom_w = abs(width - temp_w) > 0.001
-        is_custom_h = abs(height - temp_h) > 0.001
+        # Width assembly & parts
+        out_alu_w = Path(output_dir) / f"72239-{width:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
+        out_dif_w = Path(output_dir) / f"64792-{width:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+        out_asm_w = Path(output_dir) / f"72239-XXX-{width:.2f}.SLDASM"
 
-        if not (is_custom_w or is_custom_h):
-            return
+        temp_alu_w = comp_72_dir / "72239-36.00-EXTRUSION-ALUMINUM.SLDPRT"
+        temp_dif_w = comp_64_js3_dir / "64792-36.00-EXTRUSION-DIFFUSER.SLDPRT"
+        if not temp_dif_w.exists():
+            temp_dif_w = comp_64_dir / "64792-36.00-EXTRUSION-DIFFUSER.SLDPRT"
+        temp_asm_w = comp_72_dir / "72239-XXX-36.00.SLDASM"
 
-        def copy_and_update_part(temp_part: Path, out_part: Path, length_val: float, dim_name: str):
-            if not temp_part.exists():
-                log.warning(f"Extrusion part template not found: {temp_part}")
-                return
-            if not out_part.exists():
-                log.info(f"Copying part template: {temp_part} -> {out_part}")
-                _copy_file_writable(temp_part, out_part)
-            else:
-                try:
-                    os.chmod(str(out_part), 0o666)
-                except Exception as e:
-                    log.warning(f"Could not make existing file writable {out_part}: {e}")
-            
-            errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-            warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-            swModel = self.swApp.OpenDoc6(str(out_part), 1, 1, "", errors, warnings) # 1 = swDocPART
-            if swModel:
-                dim = swModel.Parameter(dim_name)
-                if dim:
-                    dim.SystemValue = length_val * 25.4 / 1000.0
-                    log.info(f"Updated {out_part.name} dimension {dim_name} to {length_val} in")
-                else:
-                    feature = swModel.FirstFeature
-                    found = False
-                    while feature:
-                        disp_dim = feature.GetFirstDisplayDimension
-                        while disp_dim:
-                            d = disp_dim.GetDimension
-                            if d.Name.lower() == dim_name.split('@')[0].lower():
-                                d.SystemValue = length_val * 25.4 / 1000.0
-                                log.info(f"Updated {out_part.name} dimension {d.Name} in {feature.Name} to {length_val} in")
-                                found = True
-                                break
-                            disp_dim = feature.GetNextDisplayDimension(disp_dim)
-                        if found:
-                            break
-                        feature = feature.GetNextFeature
-                swModel.ForceRebuild3(False)
-                swModel.Save3(0, errors, warnings)
-                self.swApp.CloseDoc(swModel.GetTitle)
+        if not out_asm_w.exists() or not out_alu_w.exists():
+            _copy_file_writable(temp_alu_w, out_alu_w)
+            _copy_file_writable(temp_dif_w, out_dif_w)
+            _copy_file_writable(temp_asm_w, out_asm_w)
 
-        # A. Width Customization (Horizontal Extrusions)
-        if is_custom_w:
-            temp_alu_w = comp_72_dir / f"72239-{temp_w:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
-            out_alu_w = comp_72_dir / f"72239-{width:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
-            copy_and_update_part(temp_alu_w, out_alu_w, width, "D1@Extrusion")
+            self.swApp.ReplaceReferencedDocument(str(out_asm_w), str(temp_alu_w), str(out_alu_w))
+            self.swApp.ReplaceReferencedDocument(str(out_asm_w), str(temp_dif_w), str(out_dif_w))
 
-            # Check both standard and JS3 locations
-            temp_dif_w_standard = comp_64_dir / f"64792-{temp_w:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-            temp_dif_w_js3 = comp_64_js3_dir / f"64792-{temp_w:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-            
-            if temp_dif_w_js3.exists():
-                temp_dif_w = temp_dif_w_js3
-                out_dif_w = comp_64_js3_dir / f"64792-{width:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-            else:
-                temp_dif_w = temp_dif_w_standard
-                out_dif_w = comp_64_dir / f"64792-{width:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            swPart = self.swApp.OpenDoc6(str(out_alu_w), swDocPART, 1, "", errors, warnings)
+            if swPart:
+                swPart.Parameter("D1@Extrusion").SystemValue = width * 0.0254
+                swPart.ForceRebuild3(False)
+                swPart.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swPart.GetTitle)
 
-            copy_and_update_part(temp_dif_w, out_dif_w, width, "D1@Boss-Extrude1")
+            swPart = self.swApp.OpenDoc6(str(out_dif_w), swDocPART, 1, "", errors, warnings)
+            if swPart:
+                swPart.Parameter("D1@Boss-Extrude1").SystemValue = width * 0.0254
+                swPart.ForceRebuild3(False)
+                swPart.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swPart.GetTitle)
 
-            temp_asm_w = comp_72_dir / f"72239-XXX-{temp_w:.2f}.SLDASM"
-            out_asm_w = comp_72_dir / f"72239-XXX-{width:.2f}.SLDASM"
-            if temp_asm_w.exists():
-                if not out_asm_w.exists():
-                    log.info(f"Copying sub-assembly: {temp_asm_w} -> {out_asm_w}")
-                    _copy_file_writable(temp_asm_w, out_asm_w)
-                else:
-                    try:
-                        os.chmod(str(out_asm_w), 0o666)
-                    except Exception as e:
-                        log.warning(f"Could not make existing file writable {out_asm_w}: {e}")
-                self.swApp.ReplaceReferencedDocument(str(out_asm_w), str(temp_alu_w), str(out_alu_w))
-                self.swApp.ReplaceReferencedDocument(str(out_asm_w), str(temp_dif_w_js3), str(out_dif_w))
-                self.swApp.ReplaceReferencedDocument(str(out_asm_w), str(temp_dif_w_standard), str(out_dif_w))
-                
-                errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                swAsm = self.swApp.OpenDoc6(str(out_asm_w), 2, 1, "", errors, warnings)
-                if swAsm:
-                    swAsm.ForceRebuild3(False)
-                    swAsm.Save3(0, errors, warnings)
-                    self.swApp.CloseDoc(swAsm.GetTitle)
+            swAsm = self.swApp.OpenDoc6(str(out_asm_w), swDocASSEMBLY, 1, "", errors, warnings)
+            if swAsm:
+                swAsm.ForceRebuild3(False)
+                swAsm.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swAsm.GetTitle)
 
-        # B. Height Customization (Vertical Extrusions, standard & N)
-        if is_custom_h:
-            # Extrusion N (with slots/holes)
-            temp_alu_hn = comp_72_dir / f"72239-{temp_h:.2f}-N-EXTRUSION-ALUMINUM.SLDPRT"
-            out_alu_hn = comp_72_dir / f"72239-{height:.2f}-N-EXTRUSION-ALUMINUM.SLDPRT"
-            copy_and_update_part(temp_alu_hn, out_alu_hn, height, "D1@Extrusion")
+        # Height assembly & parts
+        out_alu_h = Path(output_dir) / f"72239-{height:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
+        out_dif_h = Path(output_dir) / f"64792-{height:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+        out_asm_h = Path(output_dir) / f"72239-XXX-{height:.2f}.SLDASM"
 
-            # Standard Extrusion (non-N, used for standard height channels)
-            temp_alu_h = comp_72_dir / f"72239-{temp_h:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
-            out_alu_h = comp_72_dir / f"72239-{height:.2f}-EXTRUSION-ALUMINUM.SLDPRT"
-            copy_and_update_part(temp_alu_h, out_alu_h, height, "D1@Extrusion")
+        if not out_asm_h.exists() or not out_alu_h.exists():
+            _copy_file_writable(temp_alu_w, out_alu_h)
+            _copy_file_writable(temp_dif_w, out_dif_h)
+            _copy_file_writable(temp_asm_w, out_asm_h)
 
-            # Check both standard and JS3 locations
-            temp_dif_h_standard = comp_64_dir / f"64792-{temp_h:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-            temp_dif_h_js3 = comp_64_js3_dir / f"64792-{temp_h:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-            
-            if temp_dif_h_js3.exists():
-                temp_dif_h = temp_dif_h_js3
-                out_dif_h = comp_64_js3_dir / f"64792-{height:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
-            else:
-                temp_dif_h = temp_dif_h_standard
-                out_dif_h = comp_64_dir / f"64792-{height:.2f}-EXTRUSION-DIFFUSER.SLDPRT"
+            self.swApp.ReplaceReferencedDocument(str(out_asm_h), str(temp_alu_w), str(out_alu_h))
+            self.swApp.ReplaceReferencedDocument(str(out_asm_h), str(temp_dif_w), str(out_dif_h))
 
-            copy_and_update_part(temp_dif_h, out_dif_h, height, "D1@Boss-Extrude1")
+            swPart = self.swApp.OpenDoc6(str(out_alu_h), swDocPART, 1, "", errors, warnings)
+            if swPart:
+                swPart.Parameter("D1@Extrusion").SystemValue = height * 0.0254
+                swPart.ForceRebuild3(False)
+                swPart.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swPart.GetTitle)
 
-            temp_asm_hn = comp_72_dir / f"72239-XXX-{temp_h:.2f}-N.SLDASM"
-            out_asm_hn = comp_72_dir / f"72239-XXX-{height:.2f}-N.SLDASM"
-            if temp_asm_hn.exists():
-                if not out_asm_hn.exists():
-                    log.info(f"Copying sub-assembly: {temp_asm_hn} -> {out_asm_hn}")
-                    _copy_file_writable(temp_asm_hn, out_asm_hn)
-                else:
-                    try:
-                        os.chmod(str(out_asm_hn), 0o666)
-                    except Exception as e:
-                        log.warning(f"Could not make existing file writable {out_asm_hn}: {e}")
-                self.swApp.ReplaceReferencedDocument(str(out_asm_hn), str(temp_alu_hn), str(out_alu_hn))
-                self.swApp.ReplaceReferencedDocument(str(out_asm_hn), str(temp_dif_h_js3), str(out_dif_h))
-                self.swApp.ReplaceReferencedDocument(str(out_asm_hn), str(temp_dif_h_standard), str(out_dif_h))
-                
-                errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                swAsm = self.swApp.OpenDoc6(str(out_asm_hn), 2, 1, "", errors, warnings)
-                if swAsm:
-                    swAsm.ForceRebuild3(False)
-                    swAsm.Save3(0, errors, warnings)
-                    self.swApp.CloseDoc(swAsm.GetTitle)
+            swPart = self.swApp.OpenDoc6(str(out_dif_h), swDocPART, 1, "", errors, warnings)
+            if swPart:
+                swPart.Parameter("D1@Boss-Extrude1").SystemValue = height * 0.0254
+                swPart.ForceRebuild3(False)
+                swPart.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swPart.GetTitle)
 
-            temp_asm_h = comp_72_dir / f"72239-XXX-{temp_h:.2f}.SLDASM"
-            out_asm_h = comp_72_dir / f"72239-XXX-{height:.2f}.SLDASM"
-            if temp_asm_h.exists():
-                if not out_asm_h.exists():
-                    log.info(f"Copying sub-assembly: {temp_asm_h} -> {out_asm_h}")
-                    _copy_file_writable(temp_asm_h, out_asm_h)
-                else:
-                    try:
-                        os.chmod(str(out_asm_h), 0o666)
-                    except Exception as e:
-                        log.warning(f"Could not make existing file writable {out_asm_h}: {e}")
-                self.swApp.ReplaceReferencedDocument(str(out_asm_h), str(temp_alu_h), str(out_alu_h))
-                self.swApp.ReplaceReferencedDocument(str(out_asm_h), str(temp_dif_h_js3), str(out_dif_h))
-                self.swApp.ReplaceReferencedDocument(str(out_asm_h), str(temp_dif_h_standard), str(out_dif_h))
-                
-                errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                swAsm = self.swApp.OpenDoc6(str(out_asm_h), 2, 1, "", errors, warnings)
-                if swAsm:
-                    swAsm.ForceRebuild3(False)
-                    swAsm.Save3(0, errors, warnings)
-                    self.swApp.CloseDoc(swAsm.GetTitle)
+            swAsm = self.swApp.OpenDoc6(str(out_asm_h), swDocASSEMBLY, 1, "", errors, warnings)
+            if swAsm:
+                swAsm.ForceRebuild3(False)
+                swAsm.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swAsm.GetTitle)
+
+        # Height N assembly & parts
+        out_alu_hn = Path(output_dir) / f"72239-{height:.2f}-N-EXTRUSION-ALUMINUM.SLDPRT"
+        out_asm_hn = Path(output_dir) / f"72239-XXX-{height:.2f}-N.SLDASM"
+
+        temp_alu_hn = comp_72_dir / "72239-36.00-N-EXTRUSION-ALUMINUM.SLDPRT"
+        temp_asm_hn = comp_72_dir / "72239-XXX-36.00-N.SLDASM"
+
+        if not out_asm_hn.exists() or not out_alu_hn.exists():
+            _copy_file_writable(temp_alu_hn, out_alu_hn)
+            _copy_file_writable(temp_asm_hn, out_asm_hn)
+
+            self.swApp.ReplaceReferencedDocument(str(out_asm_hn), str(temp_alu_hn), str(out_alu_hn))
+            self.swApp.ReplaceReferencedDocument(str(out_asm_hn), str(temp_dif_w), str(out_dif_h))
+
+            swPart = self.swApp.OpenDoc6(str(out_alu_hn), swDocPART, 1, "", errors, warnings)
+            if swPart:
+                swPart.Parameter("D1@Extrusion").SystemValue = height * 0.0254
+                swPart.ForceRebuild3(False)
+                swPart.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swPart.GetTitle)
+
+            swAsm = self.swApp.OpenDoc6(str(out_asm_hn), swDocASSEMBLY, 1, "", errors, warnings)
+            if swAsm:
+                swAsm.ForceRebuild3(False)
+                swAsm.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swAsm.GetTitle)
+
+        return str(out_asm_w), str(out_asm_h), str(out_asm_hn)
+
+    def _configure_local_led(self, vault: str, output_dir: str, width: float, height: float, target_led_pn: str) -> str:
+        errors = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        warnings = win32.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+
+        comp_82_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "82000"
+        comp_led_parts_dir = Path(vault) / "Products" / "JS3" / "COMPONENTS" / "RAD4 LEDs"
+
+        # Compute physical perimeter to determine standard round length
+        total_perimeter_mm = 2 * (width + height) * 25.4 - 49.58223168
+        new_len = int(round(total_perimeter_mm / 50.0) * 50.0)
+
+        out_led_part = Path(output_dir) / f"RAD3-LED-{new_len}-{width:.2f}X{height:.2f}.SLDPRT"
+        out_led_asm = Path(output_dir) / f"82180-RAD3-{new_len}MM-{width:.2f}X{height:.2f}.SLDASM"
+
+        # Templates
+        temp_led_part = comp_led_parts_dir / "RAD3-LED-3600-36.00X36.00.SLDPRT"
+        if not temp_led_part.exists():
+            temp_led_part = Path(vault) / "COMPONENTS" / "STANDARD PARTS" / "Configurator Parts" / "RAD3" / "LEDs" / "RAD3-LED-3600-36.00X36.00.SLDPRT"
+        temp_led_asm = comp_82_dir / "82180-RAD3-3600MM-36.00X36.00.SLDASM"
+
+        if not out_led_asm.exists() or not out_led_part.exists():
+            _copy_file_writable(temp_led_part, out_led_part)
+            _copy_file_writable(temp_led_asm, out_led_asm)
+
+            self.swApp.ReplaceReferencedDocument(str(out_led_asm), str(temp_led_part), str(out_led_part))
+
+            swPart = self.swApp.OpenDoc6(str(out_led_part), swDocPART, 1, "", errors, warnings)
+            if swPart:
+                swPart.Parameter("D1@MASTER SKETCH").SystemValue = width * 0.0254
+                swPart.Parameter("D2@MASTER SKETCH").SystemValue = height * 0.0254
+                swPart.ForceRebuild3(False)
+                swPart.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swPart.GetTitle)
+
+            swAsm = self.swApp.OpenDoc6(str(out_led_asm), swDocASSEMBLY, 1, "", errors, warnings)
+            if swAsm:
+                swAsm.ForceRebuild3(False)
+                swAsm.Save3(0, errors, warnings)
+                self.swApp.CloseDoc(swAsm.GetTitle)
+
+        return str(out_led_asm)
+
+    def _configure_custom_extrusions(self, vault: str, temp_w: float, temp_h: float, width: float, height: float):
+        """No-op as custom extrusions are now handled programmatically via local copy-and-replace in generate."""
+        pass
 
     def _set_custom_properties(self, swModel, props: dict):
         mgr = swModel.Extension.CustomPropertyManager("")
@@ -836,7 +744,6 @@ class SolidWorksAPI:
 
         vault = DWConstantVault
         bom_dir = Path(vault) / "Products" / "JS3" / "Mirrors" / "RAD4"
-        vault_bom_path = bom_dir / f"{result.CPN}-M-BOM.xlsx"
 
         # Search for a template in the vault using closest match logic
         template_copied = False
@@ -847,30 +754,28 @@ class SolidWorksAPI:
             
             template_bom = find_closest_template(bom_dir, "RAD4-*-M-BOM.xlsx", width, height, exclude_name=result.CPN)
             log.info(f"Using vault BOM template: {template_bom}")
-            # Copy to both locations
+            # Copy only to local output path
             _copy_file_writable(template_bom, Path(output_xlsx_path))
-            _copy_file_writable(template_bom, vault_bom_path)
             template_copied = True
         except Exception as e:
             log.warning(f"Could not resolve or copy vault BOM template: {e}")
 
         if template_copied:
             try:
-                # Open, update cells, and save to both locations
-                for path_to_save in [output_xlsx_path, str(vault_bom_path)]:
-                    wb = openpyxl.load_workbook(path_to_save)
-                    ws = wb.active
-                    
-                    # Update cells based on defined named ranges / cell addresses
-                    ws["D1"] = f"{result.CPN}-M"
-                    ws["D2"] = datetime.datetime.now().strftime("%m/%d/%Y")
-                    ws["D6"] = result.DriverEnclosurePN
-                    ws["D7"] = "AI"
-                    ws["D8"] = "AI"
-                    ws["D9"] = datetime.datetime.now().strftime("%m/%d/%Y")
-                    
-                    wb.save(path_to_save)
-                log.info(f"BOM exported with template format to {output_xlsx_path} and {vault_bom_path}")
+                # Open, update cells, and save to local output path only
+                wb = openpyxl.load_workbook(output_xlsx_path)
+                ws = wb.active
+                
+                # Update cells based on defined named ranges / cell addresses
+                ws["D1"] = f"{result.CPN}-M"
+                ws["D2"] = datetime.datetime.now().strftime("%m/%d/%Y")
+                ws["D6"] = result.DriverEnclosurePN
+                ws["D7"] = "AI"
+                ws["D8"] = "AI"
+                ws["D9"] = datetime.datetime.now().strftime("%m/%d/%Y")
+                
+                wb.save(output_xlsx_path)
+                log.info(f"BOM exported with template format to {output_xlsx_path}")
                 self._export_bom_to_pdf(output_xlsx_path)
                 return
             except Exception as e:
@@ -905,14 +810,8 @@ class SolidWorksAPI:
         ws.column_dimensions["B"].width = 30
         ws.column_dimensions["C"].width = 40
 
-        # Save to both target output and vault
+        # Save to local output target only
         wb.save(output_xlsx_path)
-        try:
-            shutil.copyfile(output_xlsx_path, str(vault_bom_path))
-            os.chmod(str(vault_bom_path), 0o666)
-        except Exception as e:
-            log.warning(f"Could not copy fallback BOM to vault: {e}")
-            
         log.info(f"BOM exported (fallback) to: {output_xlsx_path}")
         self._export_bom_to_pdf(output_xlsx_path)
 
