@@ -22,6 +22,164 @@ from rad4_engine import RAD4Inputs, RAD4Result, DWConstantVault
 
 log = logging.getLogger(__name__)
 
+# --- Note Text Constants from Claude rules ---
+SPEC_BASE = (
+    "BRING MC CABLE TO ENCLOSURE. INSERT GROUND WIRE IN GROUNDED CONNECTOR. "
+    "INSERT HOT AND NEUTRAL WIRE INTO LUMINAIRE DISCONNECT. "
+    "NO ELECTRICAL BOX REQUIRED. ELECTRICAL POWER SHOULD BE CONTROLLED "
+    "BY A WALL SWITCH (BY OTHERS). MIRROR SHOULD BE MOUNTED TO A "
+    "MECHANICALLY SOUND SURFACE SUCH AS WALL STUDS TO SUPPORT ITS WEIGHT."
+)
+SPEC_DIM_0_10V = (
+    "BRING MC CABLE TO ENCLOSURE. INSERT GROUND WIRE IN GROUNDED CONNECTOR. "
+    "INSERT HOT AND NEUTRAL WIRE INTO LUMINAIRE DISCONNECT. "
+    "0-10V CONTROL WIRES ARE BROUGHT IN THROUGH THE SECOND KNOCKOUT. "
+    "NO ELECTRICAL BOX REQUIRED. ELECTRICAL POWER SHOULD BE CONTROLLED "
+    "BY A WALL SWITCH (BY OTHERS). MIRROR SHOULD BE MOUNTED TO A "
+    "MECHANICALLY SOUND SURFACE SUCH AS WALL STUDS TO SUPPORT ITS WEIGHT."
+)
+SPEC_CORD = (
+    "PLUG FIXTURE INTO RECEPTACLE LOCATED IN WALL BEHIND MIRROR. "
+    "RECEPTACLES SHOULD BE CONTROLLED BY WALL SWITCHES (BY OTHERS). "
+    "MIRROR SHOULD BE MOUNTED TO A MECHANICALLY SOUND SURFACE SUCH AS "
+    "WALL STUDS TO SUPPORT ITS WEIGHT."
+)
+SPEC_HANGING = (
+    "BRING MC CABLE TO DRIVER ENCLOSURE EITHER DIRECTLY FROM BEHIND INTO "
+    "KNOCKOUT OR PROVIDE (30\" MAX) WHIP TO SIDE KNOCKOUT. INSERT GROUND "
+    "WIRE IN GROUNDED CONNECTOR. INSERT HOT AND NEUTRAL WIRE INTO "
+    "LUMINAIRE DISCONNECT. LOW VOLTAGE CONTROL WIRES ARE BROUGHT IN "
+    "THROUGH THE SECOND KNOCKOUT. NO ELECTRICAL BOX REQUIRED. ELECTRICAL "
+    "POWER SHOULD BE CONTROLLED BY A WALL SWITCH (BY OTHERS). HANGING "
+    "BRACKET SHOULD BE MOUNTED TO A MECHANICALLY SOUND SURFACE SUCH AS "
+    "WALL STUDS TO SUPPORT FIXTURE WEIGHT."
+)
+SPEC_WG3_TAIL = " MAIN LIGHTS AND WALL GLOW OPERATE TOGETHER."
+
+ATTN_NEC = (
+    "THIS PRODUCT MUST BE CONNECTED TO EARTH GROUND IN ACCORDANCE "
+    "WITH NEC CODE 250.20 (B). IMPROPER GROUND CAN RESULT IN "
+    "IRREGULAR FUNCTION OF THE UNIT."
+)
+ATTN_GFCI = (
+    "ELECTRIC MIRROR RECOMMENDS A HARDWIRED INSTALLATION AS THE PREFERRED "
+    "METHOD OF INSTALLATION FOR ALL LIGHTED MIRROR PRODUCTS. PRIOR TO THE "
+    "DELIVERY OF THIS CORD CONNECTED LUMINAIRE, WE RECOMMEND THAT YOU CONTACT "
+    "YOUR LOCAL ELECTRICAL INSPECTOR TO REVIEW THE PLANNED CONDITIONS FOR THE "
+    "INSTALLATION OF THIS PRODUCT. THIS WILL ENSURE COMPLIANCE WITH THE LOCAL "
+    "ELECTRICAL CODE. IF A GFCI CIRCUIT IS REQUIRED, INSTALL A NON-GFCI OUTLET "
+    "BEHIND THE MIRROR. THIS OUTLET MUST BE WIRED FROM THE LOAD SIDE OF AN "
+    "ACCESSIBLE GFCI OUTLET. THIS WILL PREVENT HAVING TO REMOVE THE MIRROR TO "
+    "RESET THE GFCI RECEPTACLE. THE LOAD ON THIS GFCI CIRCUIT SHOULD BE "
+    "CAREFULLY CONSIDERED TO PREVENT UNINTENDED TRIPPING OF THE GFCI. MUST BE "
+    "INSTALLED IN ACCORDANCE WITH ALL NATIONAL AND LOCAL ELECTRICAL CODES. "
+    "ELECTRIC MIRROR IS NOT RESPONSIBLE FOR COMPATIBILITY OF A GFCI CIRCUIT "
+    "WITH OUR PRODUCTS. CONTACT THE GFCI MANUFACTURER TO ENSURE COMPATIBILITY."
+)
+
+DIM_TRIAC = (
+    "TO ENSURE PROPER OPERATION OF THIS DIMMABLE PRODUCT IT IS IMPORTANT TO "
+    "SELECT A COMPATIBLE DIMMING SWITCH. THIS LUMINAIRE REQUIRES A COMPATIBLE "
+    "FORWARD PHASE LINE DIMMER SWITCH. CONTACT THE CONTROLLER MANUFACTURER "
+    "TO CONFIRM COMPATIBILITY WITH THIS PRODUCT. MUST BE INSTALLED IN "
+    "ACCORDANCE WITH ALL NATIONAL AND LOCAL ELECTRICAL CODES. ELECTRIC "
+    "MIRROR IS NOT RESPONSIBLE FOR DIMMER SWITCH COMPATIBILITY. THIS PRODUCT "
+    "USES: SMT-024-096VTSP TRIAC PHASE DIMMING DRIVER."
+)
+DIM_0_10V = (
+    "TO ENSURE PROPER OPERATION OF THIS DIMMABLE PRODUCT, IT IS IMPORTANT TO "
+    "SELECT A COMPATIBLE DIMMING SWITCH. THIS LUMINAIRE REQUIRES A 0-10V "
+    "ELECTRONIC DIMMER SWITCH. ELECTRIC MIRROR IS NOT RESPONSIBLE FOR DIMMER "
+    "SWITCH COMPATIBILITY. MUST BE INSTALLED IN ACCORDANCE WITH ALL NATIONAL "
+    "AND LOCAL ELECTRICAL CODES."
+)
+
+DEF_KEEN_DISC = (
+    "KEEN UNIT CONTROLS THE LIGHTING ONLY SEPERATE WALL SWITCH "
+    "IS REQUIRED TO CONTROL DEFOGGER POWER"
+)
+
+def parse_cpn_options(cpn: str) -> set[str]:
+    parts = [p.strip().upper() for p in cpn.split("-")]
+    # Find dimension token index
+    dim_idx = -1
+    for i, p in enumerate(parts):
+        if "X" in p and re.search(r"\d+\.\d+X\d+\.\d+", p):
+            dim_idx = i
+            break
+    if dim_idx == -1:
+        return set()
+    
+    finish_idx = dim_idx + 1
+    # Options are all parts after finish_idx, except the last one (which is CCT)
+    if finish_idx < len(parts) - 1:
+        return set(parts[finish_idx + 1 : -1])
+    return set()
+
+def _get_drawing_notes_from_opts(w: float, h: float, opts: set[str]) -> dict:
+    area = w * h
+    has_d1 = "D1" in opts
+    has_d2 = "D2" in opts
+    has_df = "DF" in opts
+    has_dfx = "DFX" in opts
+    has_any_keen = bool(opts & {"KG", "KG2", "KD", "KC"})
+    has_any_clock = bool(opts & {"CK2", "CK3"})
+    has_cc2 = "CC2" in opts
+    has_wg3 = "WG3" in opts
+    has_no = "NO" in opts
+    has_277V = "277V" in opts
+
+    notes = {}
+
+    # SPECIFICATION
+    if has_cc2:
+        spec = SPEC_CORD
+    elif has_any_clock:
+        spec = SPEC_HANGING
+    elif has_d1 or has_df or has_dfx:
+        spec = SPEC_DIM_0_10V
+    else:
+        spec = SPEC_BASE
+
+    if has_wg3 or has_no:
+        spec += SPEC_WG3_TAIL
+    notes["SPECIFICATION"] = spec
+
+    # ATTENTION
+    if has_cc2:
+        notes["ATTENTION"] = ATTN_GFCI
+    elif has_any_keen:
+        notes["ATTENTION"] = ATTN_NEC
+
+    # DEFOGGER
+    if has_df or has_dfx:
+        if has_277V:
+            w_str = "20W @ 24V"
+        elif has_dfx:
+            w_str = "25W @ 120V"
+        elif area < 900:
+            w_str = "15W @ 120V"
+        elif area < 1900:
+            w_str = "25W @ 120V"
+        elif area < 2465:
+            w_str = "50W @ 120V"
+        else:
+            w_str = "100W @ 120V"
+        notes["DEFOGGER"] = f"VOLTAGE / WATTAGE: {w_str}"
+
+    # DEFOGGER DISCLAIMER (KEEN)
+    if has_any_keen and (has_df or has_dfx):
+        notes["DEFOGGER DISCLAIMER (KEEN)"] = DEF_KEEN_DISC
+
+    # DIMMING
+    if has_d2:
+        notes["DIMMING"] = DIM_TRIAC
+    elif has_d1:
+        notes["DIMMING"] = DIM_0_10V
+
+    return notes
+
+
 # COM Constants
 swDocPART = 1
 swDocASSEMBLY = 2
@@ -129,6 +287,8 @@ class SolidWorksAPI:
         height = inp.UnitHeight
         cpn = result.CPN
         vault = DWConstantVault
+        powerBoxY = 0.0
+        hangerY = 0.0
 
         log.info(f"Starting programmatic generative configuration for: {cpn}")
 
@@ -450,8 +610,24 @@ class SolidWorksAPI:
         if swChassis:
             self.swApp.ActivateDoc3(swChassis.GetTitle, True, 2, errors)
             
-            # Set driver configuration
+            # Read coordinates from Chassis assembly components
             components = swChassis.GetComponents(True)
+            for comp in components:
+                if comp.IsSuppressed:
+                    continue
+                c_name = comp.Name2.upper()
+                if "81330" in c_name or "DRIVER-MODULE" in c_name:
+                    trans = comp.Transform2
+                    if trans:
+                        powerBoxY = trans.ArrayData[10] * 39.3701
+                        log.info(f"Found active Driver Module Y position relative to origin: {powerBoxY:.4f} in")
+                elif "HANGER" in c_name or "81014" in c_name:
+                    trans = comp.Transform2
+                    if trans:
+                        hangerY = trans.ArrayData[10] * 39.3701
+                        log.info(f"Found active Hanger Bracket Y position relative to origin: {hangerY:.4f} in")
+
+            # Set driver configuration
             driver_found = False
             for comp in components:
                 name = comp.Name2
@@ -536,6 +712,49 @@ class SolidWorksAPI:
         log.info(f"Opening Drawing copy: {out_drawing}")
         swDrawing = self.swApp.OpenDoc6(str(out_drawing), swDocDRAWING, 1, "", errors, warnings)
         if swDrawing:
+            # Re-scale sheets and apply standard formats
+            opts = parse_cpn_options(cpn)
+            parsed_notes = _get_drawing_notes_from_opts(width, height, opts)
+            num_notes = len(parsed_notes)
+            scale_den = self._calculate_letter_scale(width, height, num_notes)
+            log.info(f"Applying scale 1:{scale_den} and standard formats for Letter sheets.")
+            
+            templates_dir = Path(__file__).parent / "templates"
+            format_p1 = str(templates_dir / "sales-aid-a-p1-26.slddrt")
+            format_p2 = str(templates_dir / "sales-aid-a-p2-26.slddrt")
+            formats = [format_p1, format_p2]
+            
+            sheet_names = swDrawing.GetSheetNames
+            for i, sheet_name in enumerate(sheet_names):
+                if i >= 2:
+                    break
+                swDrawing.ActivateSheet(sheet_name)
+                # Apply SetupSheet6
+                swDrawing.SetupSheet6(
+                    sheet_name,
+                    0,   # swDwgPaperAsize
+                    12,  # swDwgTemplateCustom
+                    1.0, # Scale1
+                    float(scale_den), # Scale2
+                    False, # FirstPage
+                    formats[i], # TemplatePath
+                    0.2794, # Width (Letter width in meters)
+                    0.2159, # Height (Letter height in meters)
+                    "", # ZoneMethod
+                    False, # ZoneNumbersOnBorder
+                    0, # ZoneLetterFormat
+                    0, # ZoneNumberFormat
+                    0.0, # ZoneMarginLeft
+                    0.0, # ZoneMarginRight
+                    0.0, # ZoneMarginTop
+                    0.0  # ZoneMarginBottom
+                )
+            
+            # Update Sketch34 dimensioning on Sheet 2
+            try:
+                self._update_sketch34_dimensions(swDrawing, width, height, powerBoxY, hangerY)
+            except Exception as e:
+                log.error(f"Failed to update Sketch34 dimensions: {e}")
             FINISH_MAP = {
                 "BK": "MATTE BLACK", "BK05": "MATTE BLACK",
                 "NK": "ETCHED NICKEL", "NK04": "ETCHED NICKEL",
@@ -1007,6 +1226,9 @@ class SolidWorksAPI:
         lm_ft = 302.0
         total_lumens = round(result.LEDCutLengthIn * lm_ft / 12.0)
         
+        opts = parse_cpn_options(result.CPN)
+        parsed_notes = _get_drawing_notes_from_opts(inp.UnitWidth, inp.UnitHeight, opts)
+
         # 1. Main specs block
         if inp.Voltage == "277V":
             power_str = f"POWER REQUIREMENTS:\n277 VOLTS, {amp_277:.2f} AMPS"
@@ -1025,12 +1247,13 @@ class SolidWorksAPI:
             f"CRI: 90+"
         )
         
-        if inp.Defogger:
-            pad_size, pad_watts = self._parse_defogger_config(result.DefoggerConfig)
+        if "DEFOGGER" in parsed_notes:
+            pad_size, _ = self._parse_defogger_config(result.DefoggerConfig)
+            wattage_str = parsed_notes["DEFOGGER"].split(":")[-1].strip()
             spec_text += (
                 f"\n\nDEFOGGER SPECIFICATION:\n"
-                f"WATTAGE: {pad_watts}W\n"
-                f"VOLTAGE: 120V"
+                f"WATTAGE: {wattage_str.split('@')[0].strip()}\n"
+                f"VOLTAGE: {wattage_str.split('@')[1].strip()}"
             )
             
         spec_text += (
@@ -1039,82 +1262,25 @@ class SolidWorksAPI:
         )
         
         # 2. Spec instructions block
-        spec_inst = "SPECIFICATION:\n"
-        if inp.DimmingType in ("D1", "D2") or inp.Keen or inp.Ava:
-            spec_inst += (
-                "BRING MC CABLE TO ENCLOSURE. INSERT GROUND WIRE IN GROUNDED \n"
-                "CONNECTOR. INSERT HOT AND NEUTRAL WIRE INTO LUMINAIRE DISCONNECT. \n"
-                "LOW VOLTAGE CONTROL WIRES ARE BROUGHT IN THROUGH THE SECOND \n"
-                "KNOCKOUT. NO ELECTRICAL BOX REQUIRED. ELECTRICAL POWER SHOULD BE \n"
-                "CONTROLLED BY A WALL SWITCH (BY OTHERS).\n\n"
-            )
-        else:
-            spec_inst += (
-                "BRING MC CABLE TO DRIVER ENCLOSURE EITHER DIRECTLY FROM\n"
-                "BEHIND INTO KNOCKOUT OR PROVIDE (30\" MAX) WHIP TO SIDE\n"
-                "KNOCKOUT. INSERT GROUND WIRE IN GROUNDED CONNECTOR.\n"
-                "INSERT HOT AND NEUTRAL WIRE INTO LUMINAIRE DISCONNECT.\n"
-                "NO ELECTRICAL BOX REQUIRED. ELECTRICAL POWER SHOULD BE\n"
-                "CONTROLLED BY A WALL SWITCH (BY OTHERS).\n\n"
-            )
-        spec_inst += (
-            "MIRROR SHOULD BE MOUNTED TO A MECHANICALLY SOUND\n"
-            "SURFACE SUCH AS WALL STUDS TO SUPPORT ITS WEIGHT."
-        )
-        if inp.Keen or inp.Ava or inp.Vive:
-            spec_inst += (
-                "\n\nATTENTION: \n"
-                "THIS PRODUCT MUST BE CONNECTED TO EARTH GROUND IN\n"
-                "ACCORDANCE WITH NEC CODE 250.20 (B). IMPROPER GROUND CAN \n"
-                "RESULT IN IRREGULAR FUNCTION OF THE UNIT."
-            )
-        if inp.Keen and inp.Defogger:
-            spec_inst += (
-                "\n\nKEEN / DEFOGGER DISCLAIMER:\n"
-                "KEEN UNIT CONTROLS THE LIGHTING ONLY. SEPARATE WALL SWITCH IS \n"
-                "REQUIRED TO CONTROL FIXTURE / DEFOGGER POWER."
-            )
+        spec_inst = "SPECIFICATION:\n" + parsed_notes.get("SPECIFICATION", "")
+        if "ATTENTION" in parsed_notes:
+            spec_inst += "\n\nATTENTION:\n" + parsed_notes["ATTENTION"]
+        if "DEFOGGER DISCLAIMER (KEEN)" in parsed_notes:
+            spec_inst += "\n\nKEEN / DEFOGGER DISCLAIMER:\n" + parsed_notes["DEFOGGER DISCLAIMER (KEEN)"]
             
         # 3. Dimming compatibility
-        if inp.DimmingType in ("D1", "DM"):
-            dimmer_text = (
-                "DIMMER COMPATIBILITY:\n"
-                "TO ENSURE PROPER OPERATION OF THIS DIMMABLE PRODUCT, IT IS IMPORTANT\n"
-                "TO SELECT A COMPATIBLE DIMMING SWITCH. THIS LUMINAIRE REQUIRES A 0-10V\n"
-                "ELECTRONIC DIMMER SWITCH. ELECTRIC MIRROR IS NOT RESPONSIBLE FOR\n"
-                "DIMMER SWITCH COMPATIBILITY. MUST BE INSTALLED IN ACCORDANCE WITH\n"
-                "ALL NATIONAL AND LOCAL ELECTRICAL CODES."
-            )
-        elif inp.DimmingType == "D2":
-            dimmer_text = (
-                "DIMMER COMPATIBILITY:\n"
-                "TO ENSURE PROPER OPERATION OF THIS DIMMABLE PRODUCT IT IS IMPORTANT TO\n"
-                "SELECT A COMPATIBLE DIMMING SWITCH. THIS LUMINAIRE REQUIRES A COMPATIBLE\n"
-                "FORWARD PHASE LINE DIMMER SWITCH. CONTACT THE CONTROLLER\n"
-                "MANUFACTURER TO CONFIRM COMPATIBILITY WITH THIS PRODUCT. MUST BE\n"
-                "INSTALLED IN ACCORDANCE WITH ALL NATIONAL AND LOCAL ELECTRICAL CODES.\n"
-                "ELECTRIC MIRROR IS NOT RESPONSIBLE FOR DIMMER SWITCH COMPATIBILITY. THIS\n"
-                "PRODUCT USES: SMT-024-096VTSP TRIAC PHASE DIMMING DRIVER."
-            )
-        else:
-            dimmer_text = ""
+        dimmer_text = parsed_notes.get("DIMMING", "")
+        if dimmer_text:
+            dimmer_text = "DIMMER COMPATIBILITY:\n" + dimmer_text
             
         # 4. Defogger detail
-        if inp.Defogger:
-            pad_size, pad_watts = self._parse_defogger_config(result.DefoggerConfig)
-            defogger_text = (
-                f"DEFOGGER SPECIFICATIONS:\n"
-                f"{pad_size}\n"
-                f"120V, {pad_watts}W"
-            )
-            outline_text = (
-                f"OUTLINE OF\n"
-                f"DEFOGGER\n"
-                f"{pad_size}"
-            )
-        else:
-            defogger_text = ""
-            outline_text = ""
+        defogger_text = ""
+        outline_text = ""
+        if "DEFOGGER" in parsed_notes:
+            pad_size, _ = self._parse_defogger_config(result.DefoggerConfig)
+            wattage_str = parsed_notes["DEFOGGER"].split(":")[-1].strip()
+            defogger_text = f"DEFOGGER SPECIFICATIONS:\n{pad_size}\n{wattage_str}"
+            outline_text = f"OUTLINE OF\nDEFOGGER\n{pad_size}"
             
         # 5. Button Callout
         if inp.Keen:
@@ -1126,7 +1292,7 @@ class SolidWorksAPI:
         else:
             button_text = ""
             
-        # Let's perform drawing sheet traversal
+        # Perform drawing sheet traversal
         try:
             sheet_names = swDrawing.GetSheetNames
             for s_name in sheet_names:
@@ -1191,6 +1357,74 @@ class SolidWorksAPI:
                     view = view.GetNextView
         except Exception as e:
             log.error(f"Error during Sheet/View note traversal: {e}")
+
+    def _calculate_letter_scale(self, width: float, height: float, num_notes: int) -> int:
+        # Usable drawing limits in mm on the Letter sheet
+        LIMIT_W = 110.0 - 5.0 * max(0, num_notes - 1)
+        LIMIT_H = 102.0
+        SCALES = [6, 8, 10, 12, 14, 16, 18, 20, 24]
+        for s in SCALES:
+            w_mm = (width * 25.4) / s
+            h_mm = (height * 25.4) / s
+            if w_mm <= LIMIT_W and h_mm <= LIMIT_H:
+                return s
+        return 24
+
+    def _update_sketch34_dimensions(self, swDrawing, W: float, H: float, powerBoxY: float, hangerY: float):
+        log.info("Updating Sheet 2 Sketch34 mounting dimensions...")
+        
+        # Calculate mounting dimensions in inches
+        hanger_w = W - 6.0 if W <= 48.0 else W - 8.0
+        edge_inset = (W - hanger_w) / 2.0
+        sec_spacing = 3.5 if W < 30.0 else 6.0
+        
+        pb_orient = "horizontal" if W >= 22.0 else "vertical"
+        pb_width = 18.0 if pb_orient == "horizontal" else 10.5
+        pb_height = 10.5 if pb_orient == "horizontal" else 18.0
+        
+        cable_h = H / 2.0 + powerBoxY
+        pb_from_top = H / 2.0 - powerBoxY
+        
+        if abs(hangerY) > 0.01:
+            hanger_h = H / 2.0 + hangerY
+        else:
+            hanger_h = H - 6.0
+            
+        dims = {
+            "D4": W,
+            "D5": H,
+            "D7": hanger_w,
+            "D10": edge_inset,
+            "D8": sec_spacing,
+            "D3": cable_h,
+            "D6": pb_height,
+            "D15": pb_width,
+            "D11": pb_from_top,
+            "D12": hanger_h,
+            "D13": 4.0,
+            "D14": 0.28,
+            "D16": 1.00,
+            "D9": 2.75,
+        }
+        
+        for name, value in dims.items():
+            full = f"{name}@Sketch34"
+            dim = swDrawing.Parameter(full)
+            if dim:
+                dim.SystemValue = value * 0.0254
+                log.info(f"  Set Sketch34 dimension {name} to {value:.4f} in ({dim.SystemValue:.6f} m)")
+            else:
+                log.warning(f"  Sketch34 dimension {name} not found in drawing.")
+                
+        # Post-write verify
+        d4_val = swDrawing.Parameter("D4@Sketch34")
+        d5_val = swDrawing.Parameter("D5@Sketch34")
+        if d4_val and d5_val:
+            d4_in = d4_val.SystemValue / 0.0254
+            d5_in = d5_val.SystemValue / 0.0254
+            log.info(f"Verified Sketch34 dimensions post-write: D4={d4_in:.2f} (expected {W:.2f}), D5={d5_in:.2f} (expected {H:.2f})")
+            assert abs(d4_in - W) < 0.01, f"Sketch34 Width check failed: D4 is {d4_in:.2f} but expected {W:.2f}"
+            assert abs(d5_in - H) < 0.01, f"Sketch34 Height check failed: D5 is {d5_in:.2f} but expected {H:.2f}"
 
     def close(self):
         pass
