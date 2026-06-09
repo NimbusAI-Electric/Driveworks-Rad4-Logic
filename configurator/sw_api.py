@@ -716,34 +716,49 @@ class SolidWorksAPI:
             opts = parse_cpn_options(cpn)
             parsed_notes = _get_drawing_notes_from_opts(width, height, opts)
             num_notes = len(parsed_notes)
-            scale_den = self._calculate_letter_scale(width, height, num_notes)
-            log.info(f"Applying scale 1:{scale_den} to drawing sheets.")
+            
+            p1_scale = self._calculate_page_1_scale(width, height, num_notes)
+            p2_scale = self._calculate_page_2_scale(width, height, max(1, num_notes - 2))
+            log.info(f"Applying scales Page 1 (1:{p1_scale}), Page 2 (1:{p2_scale}) to drawing sheets.")
             
             sheet_names = swDrawing.GetSheetNames
             for i, sheet_name in enumerate(sheet_names):
                 if i >= 2:
                     break
                 swDrawing.ActivateSheet(sheet_name)
-                # Apply SetupSheet6 (use empty template path to keep template's sheet format)
-                swDrawing.SetupSheet6(
-                    sheet_name,
-                    0,   # swDwgPaperAsize
-                    12,  # swDwgTemplateCustom
-                    1.0, # Scale1
-                    float(scale_den), # Scale2
-                    False, # FirstPage
-                    "",  # TemplatePath (empty to keep the existing format)
-                    0.2794, # Width (Letter width in meters)
-                    0.2159, # Height (Letter height in meters)
-                    "", # ZoneMethod
-                    False, # ZoneNumbersOnBorder
-                    0, # ZoneLetterFormat
-                    0, # ZoneNumberFormat
-                    0.0, # ZoneMarginLeft
-                    0.0, # ZoneMarginRight
-                    0.0, # ZoneMarginTop
-                    0.0  # ZoneMarginBottom
-                )
+                scale_den = p1_scale if i == 0 else p2_scale
+                
+                # Apply SetProperties on the sheet instead of SetupSheet6
+                sheet = swDrawing.GetCurrentSheet
+                if sheet:
+                    props = sheet.GetProperties2
+                    if props:
+                        ret = sheet.SetProperties(
+                            int(props[0]),      # paperSize
+                            int(props[1]),      # templateType
+                            1.0,                # scale1 (numerator)
+                            float(scale_den),   # scale2 (denominator)
+                            bool(props[4]),     # firstPage
+                            float(props[5]),    # width
+                            float(props[6])     # height
+                        )
+                        log.info(f"Updated properties for sheet '{sheet_name}' (Scale 1:{scale_den}). Success: {ret}")
+                    else:
+                        log.error(f"Failed to get properties for sheet '{sheet_name}'")
+                else:
+                    log.error(f"Failed to get sheet object for sheet '{sheet_name}'")
+                
+                # Traverse views on this sheet and force them to use the sheet scale
+                view = swDrawing.GetFirstView
+                if view:
+                    view = view.GetNextView  # Skip the sheet view itself
+                    while view:
+                        try:
+                            view.UseSheetScale = True
+                            log.info(f"Set view.UseSheetScale = True on view '{view.Name}' on sheet '{sheet_name}'")
+                        except Exception as e:
+                            log.error(f"Failed to set UseSheetScale on view '{view.Name}' on sheet '{sheet_name}': {e}")
+                        view = view.GetNextView
             
             # Reposition Section Line A-A on Sheet 1
             try:
@@ -1230,6 +1245,11 @@ class SolidWorksAPI:
         opts = parse_cpn_options(result.CPN)
         parsed_notes = _get_drawing_notes_from_opts(inp.UnitWidth, inp.UnitHeight, opts)
 
+        # Calculate dynamic page scales for the scale notes
+        num_notes = len(parsed_notes)
+        p1_scale = self._calculate_page_1_scale(inp.UnitWidth, inp.UnitHeight, num_notes)
+        p2_scale = self._calculate_page_2_scale(inp.UnitWidth, inp.UnitHeight, max(1, num_notes - 2))
+
         # 1. Main specs block
         if inp.Voltage == "277V":
             power_str = f"POWER REQUIREMENTS:\n277 VOLTS, {amp_277:.2f} AMPS"
@@ -1296,8 +1316,10 @@ class SolidWorksAPI:
         # Perform drawing sheet traversal
         try:
             sheet_names = swDrawing.GetSheetNames
-            for s_name in sheet_names:
+            for idx, s_name in enumerate(sheet_names):
                 swDrawing.ActivateSheet(s_name)
+                current_scale = p1_scale if idx == 0 else p2_scale
+                
                 view = swDrawing.GetFirstView
                 while view:
                     note = view.GetFirstNote
@@ -1309,8 +1331,14 @@ class SolidWorksAPI:
                         # Apply rules based on text content and name matches
                         updated = False
                         
+                        # Rule 0: Title block scale note
+                        if name == "DetailItem371" or text_lower.startswith("scale:"):
+                            note.SetText(f"SCALE: 1:{current_scale}")
+                            log.info(f"Updated scale note '{name}' on sheet '{s_name}' to 'SCALE: 1:{current_scale}'")
+                            updated = True
+                            
                         # Rule 1: Main specs block
-                        if name == "DetailItem378" or ("power requirements:" in text_lower and "led specification:" in text_lower):
+                        elif name == "DetailItem378" or ("power requirements:" in text_lower and "led specification:" in text_lower):
                             note.SetText(spec_text)
                             log.info(f"Updated main specs block '{name}' on sheet '{s_name}'")
                             updated = True
@@ -1359,17 +1387,139 @@ class SolidWorksAPI:
         except Exception as e:
             log.error(f"Error during Sheet/View note traversal: {e}")
 
-    def _calculate_letter_scale(self, width: float, height: float, num_notes: int) -> int:
-        # Usable drawing limits in mm on the Letter sheet
-        LIMIT_W = 110.0 - 5.0 * max(0, num_notes - 1)
-        LIMIT_H = 102.0
-        SCALES = [6, 8, 10, 12, 14, 16, 18, 20, 24]
-        for s in SCALES:
-            w_mm = (width * 25.4) / s
-            h_mm = (height * 25.4) / s
-            if w_mm <= LIMIT_W and h_mm <= LIMIT_H:
+    def _calculate_page_1_scale(self, width: float, height: float, num_notes: int) -> int:
+        LADDER = [8, 10, 12, 14, 16, 18, 20, 24]
+        SHEET_W = 17.0
+        SHEET_H = 11.0
+        TITLE_BLOCK_H = 1.25
+        MARGIN = 0.40
+        PAGE_SEP_H = 0.20
+        NOTE_AVG_H = 1.50
+        NOTES_COL_BASE_W = 2.80
+        NOTES_COL_GROWTH_W = 0.30
+        P1_SIDE_VIEW_W = 1.20
+        P1_DIM_LEADER_W = 1.20
+        P1_DIM_LEADER_H = 1.20
+        CONVENTIONAL_TARGET_BASE = 4.25
+        CONVENTIONAL_NOTES_DROP = 0.08
+        CONVENTIONAL_WIDE_BONUS = 0.25
+        CONVENTIONAL_SQUARE_DROP = 0.40
+        CONVENTIONAL_VERTICAL_PB = 0.05
+        GEOMETRY_SAFETY = 1.10
+
+        pb = "horizontal" if width >= 22.0 else "vertical"
+        
+        # Notes column width
+        notes_w = 0.0
+        if num_notes > 0:
+            notes_w = NOTES_COL_BASE_W + NOTES_COL_GROWTH_W * (num_notes - 1)
+            col_h_avail = SHEET_H - TITLE_BLOCK_H - 2 * MARGIN
+            needed_h = num_notes * NOTE_AVG_H
+            if needed_h > col_h_avail:
+                notes_w *= (needed_h / col_h_avail)
+            notes_w = min(notes_w, 6.0)
+
+        # Clear area
+        clear_w = SHEET_W - 2 * MARGIN - notes_w - PAGE_SEP_H
+        clear_h = SHEET_H - TITLE_BLOCK_H - 2 * MARGIN
+        view_w = clear_w - P1_SIDE_VIEW_W - P1_DIM_LEADER_W
+        view_h = clear_h - P1_DIM_LEADER_H
+
+        n_required = max(width / max(0.5, view_w), height / max(0.5, view_h)) * GEOMETRY_SAFETY
+
+        # Conventional target
+        t = CONVENTIONAL_TARGET_BASE - CONVENTIONAL_NOTES_DROP * max(0, num_notes - 1)
+        r = width / height if height > 0 else 1.0
+        if r >= 1.2:
+            t += CONVENTIONAL_WIDE_BONUS
+        elif r <= 1/1.2:
+            pass
+        else:
+            t -= CONVENTIONAL_SQUARE_DROP
+        if pb == "vertical":
+            t -= CONVENTIONAL_VERTICAL_PB
+        target = max(2.5, t)
+        
+        n_preferred = max(width, height) / target
+        
+        raw_n = max(n_required, n_preferred)
+        if raw_n <= 0:
+            return LADDER[0]
+        for s in LADDER:
+            if s >= raw_n:
                 return s
-        return 24
+        return LADDER[-1]
+
+    def _calculate_page_2_scale(self, width: float, height: float, num_notes_p2: int) -> int:
+        LADDER = [8, 10, 12, 14, 16, 18, 20, 24]
+        SHEET_W = 17.0
+        SHEET_H = 11.0
+        TITLE_BLOCK_H = 1.25
+        MARGIN = 0.40
+        PAGE_SEP_H = 0.20
+        NOTE_AVG_H = 1.50
+        NOTES_COL_BASE_W = 2.80
+        NOTES_COL_GROWTH_W = 0.30
+        P2_DIM_LEADER_W = 1.00
+        P2_DIM_LEADER_H = 1.20
+        DETAIL_A_HORIZ_W = 4.80
+        DETAIL_A_HORIZ_H = 3.00
+        DETAIL_A_VERT_W = 3.00
+        DETAIL_A_VERT_H = 4.80
+        CONVENTIONAL_TARGET_BASE = 4.25
+        CONVENTIONAL_NOTES_DROP = 0.08
+        CONVENTIONAL_WIDE_BONUS = 0.25
+        CONVENTIONAL_SQUARE_DROP = 0.40
+        CONVENTIONAL_VERTICAL_PB = 0.05
+        P2_TARGET_BONUS = 0.50
+        GEOMETRY_SAFETY = 1.10
+
+        pb = "horizontal" if width >= 22.0 else "vertical"
+        
+        # Notes column width
+        notes_w = 0.0
+        if num_notes_p2 > 0:
+            notes_w = NOTES_COL_BASE_W + NOTES_COL_GROWTH_W * (num_notes_p2 - 1)
+            col_h_avail = SHEET_H - TITLE_BLOCK_H - 2 * MARGIN
+            needed_h = num_notes_p2 * NOTE_AVG_H
+            if needed_h > col_h_avail:
+                notes_w *= (needed_h / col_h_avail)
+            notes_w = min(notes_w, 6.0)
+
+        # Clear area
+        clear_w = SHEET_W - 2 * MARGIN - notes_w - PAGE_SEP_H
+        clear_h = SHEET_H - TITLE_BLOCK_H - 2 * MARGIN
+        if pb == "horizontal":
+            det_w, det_h = DETAIL_A_HORIZ_W, DETAIL_A_HORIZ_H
+        else:
+            det_w, det_h = DETAIL_A_VERT_W, DETAIL_A_VERT_H
+        view_w = clear_w - det_w - P2_DIM_LEADER_W
+        view_h = clear_h - P2_DIM_LEADER_H
+
+        n_required = max(width / max(0.5, view_w), height / max(0.5, view_h)) * GEOMETRY_SAFETY
+
+        # Conventional target
+        t = CONVENTIONAL_TARGET_BASE - CONVENTIONAL_NOTES_DROP * max(0, num_notes_p2 - 1)
+        r = width / height if height > 0 else 1.0
+        if r >= 1.2:
+            t += CONVENTIONAL_WIDE_BONUS
+        elif r <= 1/1.2:
+            pass
+        else:
+            t -= CONVENTIONAL_SQUARE_DROP
+        if pb == "vertical":
+            t -= CONVENTIONAL_VERTICAL_PB
+        target = max(2.5, t) + P2_TARGET_BONUS
+        
+        n_preferred = max(width, height) / target
+        
+        raw_n = max(n_required, n_preferred)
+        if raw_n <= 0:
+            return LADDER[0]
+        for s in LADDER:
+            if s >= raw_n:
+                return s
+        return LADDER[-1]
 
     def _update_sketch34_dimensions(self, swDrawing, W: float, H: float, powerBoxY: float, hangerY: float):
         log.info("Updating Sheet 2 Sketch34 mounting dimensions...")
