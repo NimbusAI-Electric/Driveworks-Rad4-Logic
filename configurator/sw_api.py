@@ -712,24 +712,19 @@ class SolidWorksAPI:
         log.info(f"Opening Drawing copy: {out_drawing}")
         swDrawing = self.swApp.OpenDoc6(str(out_drawing), swDocDRAWING, 1, "", errors, warnings)
         if swDrawing:
-            # Re-scale sheets and apply standard formats
+            # Re-scale sheets without changing the sheet format
             opts = parse_cpn_options(cpn)
             parsed_notes = _get_drawing_notes_from_opts(width, height, opts)
             num_notes = len(parsed_notes)
             scale_den = self._calculate_letter_scale(width, height, num_notes)
-            log.info(f"Applying scale 1:{scale_den} and standard formats for Letter sheets.")
-            
-            templates_dir = Path(__file__).parent / "templates"
-            format_p1 = str(templates_dir / "sales-aid-a-p1-26.slddrt")
-            format_p2 = str(templates_dir / "sales-aid-a-p2-26.slddrt")
-            formats = [format_p1, format_p2]
+            log.info(f"Applying scale 1:{scale_den} to drawing sheets.")
             
             sheet_names = swDrawing.GetSheetNames
             for i, sheet_name in enumerate(sheet_names):
                 if i >= 2:
                     break
                 swDrawing.ActivateSheet(sheet_name)
-                # Apply SetupSheet6
+                # Apply SetupSheet6 (use empty template path to keep template's sheet format)
                 swDrawing.SetupSheet6(
                     sheet_name,
                     0,   # swDwgPaperAsize
@@ -737,7 +732,7 @@ class SolidWorksAPI:
                     1.0, # Scale1
                     float(scale_den), # Scale2
                     False, # FirstPage
-                    formats[i], # TemplatePath
+                    "",  # TemplatePath (empty to keep the existing format)
                     0.2794, # Width (Letter width in meters)
                     0.2159, # Height (Letter height in meters)
                     "", # ZoneMethod
@@ -749,6 +744,12 @@ class SolidWorksAPI:
                     0.0, # ZoneMarginTop
                     0.0  # ZoneMarginBottom
                 )
+            
+            # Reposition Section Line A-A on Sheet 1
+            try:
+                self._reposition_section_line_aa(swDrawing)
+            except Exception as e:
+                log.error(f"Failed to reposition Section Line A-A: {e}")
             
             # Update Sketch34 dimensioning on Sheet 2
             try:
@@ -1425,6 +1426,72 @@ class SolidWorksAPI:
             log.info(f"Verified Sketch34 dimensions post-write: D4={d4_in:.2f} (expected {W:.2f}), D5={d5_in:.2f} (expected {H:.2f})")
             assert abs(d4_in - W) < 0.01, f"Sketch34 Width check failed: D4 is {d4_in:.2f} but expected {W:.2f}"
             assert abs(d5_in - H) < 0.01, f"Sketch34 Height check failed: D5 is {d5_in:.2f} but expected {H:.2f}"
+
+    def _reposition_section_line_aa(self, swDrawing):
+        """
+        Reposition the Section Line (A-A) on Drawing View4 (front view)
+        so that it cuts through the rightmost beam/frame edge of the mirror.
+        """
+        log.info("Starting Section Line A-A repositioning...")
+        try:
+            swDrawing.ActivateSheet("Sheet1")
+            view = swDrawing.GetFirstView
+            front_view = None
+            while view:
+                if view.Name.lower() == "drawing view4":
+                    front_view = view
+                    break
+                view = view.GetNextView
+                
+            if not front_view:
+                log.warning("Drawing View4 (front view) not found on Sheet1. Skipping Section Line A-A repositioning.")
+                return
+
+            sec_lines = front_view.GetSectionLines
+            if not sec_lines:
+                log.warning("No section lines found in Drawing View4. Skipping repositioning.")
+                return
+
+            sl = sec_lines[0]
+            
+            # Retrieve view attributes
+            outline = front_view.GetOutline
+            position = front_view.Position
+            scale_ratio = front_view.ScaleRatio
+            
+            if not outline or not position or not scale_ratio:
+                log.warning("Could not retrieve front view outline, position, or scale. Skipping repositioning.")
+                return
+
+            scale = scale_ratio[0] / scale_ratio[1]
+            
+            # 1. Arrow center at right beam: ~5.8mm inside view right edge on sheet
+            arrow_center_x_sheet = outline[2] - 0.0058
+            center_x_model = (arrow_center_x_sheet - position[0]) / scale
+            
+            # 2. Y at vertical midpoint of view
+            view_mid_y_sheet = (outline[1] + outline[3]) / 2.0
+            center_y_model = (view_mid_y_sheet - position[1]) / scale
+            
+            # 3. Compact shoulder: ~104mm model half-span = 52.2mm
+            half_shoulder = 0.0522 # meters
+            
+            new_line_info = [
+                center_x_model + half_shoulder, center_y_model, 0.0,
+                center_x_model - half_shoulder, center_y_model, 0.0
+            ]
+            
+            log.info(f"Setting Section Line A-A to model coords: {new_line_info}")
+            
+            import win32com.client as win32
+            import pythoncom
+            dispid = sl._oleobj_.GetIDsOfNames("SetLineInfo")
+            var_info = win32.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, new_line_info)
+            res = sl._oleobj_.Invoke(dispid, 0, pythoncom.DISPATCH_METHOD, True, var_info)
+            
+            log.info(f"SetLineInfo returned: {res}")
+        except Exception as e:
+            log.error(f"Error during Section Line A-A repositioning: {e}", exc_info=True)
 
     def close(self):
         pass
