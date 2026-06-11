@@ -1341,12 +1341,28 @@ class SolidWorksAPI:
                         elif name == "DetailItem378" or ("power requirements:" in text_lower and "led specification:" in text_lower):
                             note.SetText(spec_text)
                             log.info(f"Updated main specs block '{name}' on sheet '{s_name}'")
+                            if idx == 0:
+                                try:
+                                    ann = note.GetAnnotation
+                                    if ann:
+                                        ann.SetPosition(7.96 / 39.3701, 8.12 / 39.3701, 0.0)
+                                        log.info(f"Repositioned specs block '{name}' on sheet '{s_name}' to top (X=7.96\", Y=8.12\")")
+                                except Exception as ep:
+                                    log.error(f"Failed to reposition specs block '{name}': {ep}")
                             updated = True
                             
                         # Rule 2: Spec instructions
                         elif name in ("DetailItem436", "DetailItem435", "DetailItem434") or ("specification:" in text_lower and "bring mc cable" in text_lower):
                             note.SetText(spec_inst)
                             log.info(f"Updated spec instructions '{name}' on sheet '{s_name}'")
+                            if idx == 0:
+                                try:
+                                    ann = note.GetAnnotation
+                                    if ann:
+                                        ann.SetPosition(4.58 / 39.3701, 8.11 / 39.3701, 0.0)
+                                        log.info(f"Repositioned spec instructions '{name}' on sheet '{s_name}' to top (X=4.58\", Y=8.11\")")
+                                except Exception as ep:
+                                    log.error(f"Failed to reposition spec instructions '{name}': {ep}")
                             updated = True
                             
                         # Rule 3: Dimmer compatibility
@@ -1373,6 +1389,23 @@ class SolidWorksAPI:
                             log.info(f"Updated touch button callout '{name}' on sheet '{s_name}'")
                             updated = True
                             
+                        # Rule 8: OFF WALL note on Drawing View5
+                        elif "off wall" in text_lower and view.Name.lower() == "drawing view5":
+                            try:
+                                outline = view.GetOutline
+                                if outline:
+                                    xMax, yMax = outline[2], outline[3]
+                                    h = yMax - outline[1]
+                                    ann = note.GetAnnotation
+                                    if ann:
+                                        x = xMax + 0.008
+                                        y = (yMax + 0.01 * h) - 0.006
+                                        ann.SetPosition(x, y, 0.0)
+                                        log.info(f"Dynamically positioned OFF WALL note to X={x:.4f}m, Y={y:.4f}m")
+                                        updated = True
+                            except Exception as en5:
+                                log.error(f"Failed to reposition OFF WALL note: {en5}")
+                            
                         # Rule 7: Clean up duplicates (clear standalone warning notes since they are now appended to spec_inst)
                         elif not updated:
                             if "earth ground in\naccordance with nec" in text_lower or "earth ground in\r\naccordance with nec" in text_lower:
@@ -1383,6 +1416,38 @@ class SolidWorksAPI:
                                 log.info(f"Cleared standalone keen disclaimer '{name}' to avoid duplicate")
                                 
                         note = note.GetNext
+                    
+                    # Reposition dimensions on Drawing View5
+                    if view.Name.lower() == "drawing view5":
+                        try:
+                            outline = view.GetOutline
+                            if outline:
+                                xMin, yMin, xMax, yMax = outline[0], outline[1], outline[2], outline[3]
+                                h = yMax - yMin
+                                clearInner = 0.008
+                                clearOuter = 0.0125
+                                
+                                disp_dim = view.GetFirstDisplayDimension5
+                                while disp_dim:
+                                    dim = disp_dim.GetDimension2
+                                    if dim:
+                                        dim_name = dim.Name.upper()
+                                        ann = disp_dim.GetAnnotation
+                                        if ann:
+                                            if "RD2" in dim_name:
+                                                x = xMax + clearOuter
+                                                y = yMax + 0.14 * h
+                                                ann.SetPosition(x, y, 0.0)
+                                                log.info(f"Dynamically positioned RD2 to X={x:.4f}m, Y={y:.4f}m")
+                                            elif "RD1" in dim_name:
+                                                x = xMax + clearInner
+                                                y = yMax + 0.01 * h
+                                                ann.SetPosition(x, y, 0.0)
+                                                log.info(f"Dynamically positioned RD1 to X={x:.4f}m, Y={y:.4f}m")
+                                    disp_dim = disp_dim.GetNext5
+                        except Exception as ed5:
+                            log.error(f"Failed to reposition dimensions on Drawing View5: {ed5}")
+                            
                     view = view.GetNextView
         except Exception as e:
             log.error(f"Error during Sheet/View note traversal: {e}")
