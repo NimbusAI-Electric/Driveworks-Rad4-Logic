@@ -46,7 +46,9 @@ class ConfigRequest(BaseModel):
     Voltage:         str    = "Standard"
     DimmingType:     str    = ""
     Ava:             bool   = False
+    AvaLocation:     str    = "Center"
     Keen:            bool   = False
+    KeenLocation:    str    = "Center"
     Clock:           bool   = False
     ClockType:       str    = ""
     ClockLocation:   str    = "Right"
@@ -141,7 +143,9 @@ def _map_request(req: ConfigRequest) -> RAD4Inputs:
         Dimming         = bool(req.DimmingType),
         DimmingType     = req.DimmingType,
         Ava             = req.Ava,
+        AvaLocation     = req.AvaLocation,
         Keen            = req.Keen,
+        KeenLocation    = req.KeenLocation,
         Clock           = req.Clock,
         ClockType       = req.ClockType,
         ClockLocation   = req.ClockLocation,

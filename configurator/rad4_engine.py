@@ -122,6 +122,8 @@ class RAD4Inputs:
     # Dimming  (radio buttons on form)
     Dimming:     bool  = False
     DimmingType: str   = ""     # "D1", "D2", "AC","AD","AE","AF","AK", "KC","KD","KG","KH"
+    AvaLocation:  str  = "Center"
+    KeenLocation: str  = "Center"
 
     # Options (checkboxes on form)
     Ava:         bool  = False
@@ -247,9 +249,19 @@ def build_cpn(inp: RAD4Inputs) -> str:
     if inp.DimmingType in ("D1", "D2"):
         cpn += f"-{inp.DimmingType}"
     elif inp.Ava and inp.DimmingType:
-        cpn += f"-{inp.DimmingType}"
+        loc = ""
+        if inp.AvaLocation == "Left":
+            loc = "L"
+        elif inp.AvaLocation == "Right":
+            loc = "R"
+        cpn += f"-{inp.DimmingType}{loc}"
     elif inp.Keen and inp.DimmingType:
-        cpn += f"-{inp.DimmingType}"
+        loc = ""
+        if inp.KeenLocation == "Left":
+            loc = "L"
+        elif inp.KeenLocation == "Right":
+            loc = "R"
+        cpn += f"-{inp.DimmingType}{loc}"
 
     # 5. Defogger
     if inp.Defogger:

@@ -188,6 +188,13 @@
     cursor: pointer;
     color: var(--em-text);
   }
+  label.disabled-option {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  label.disabled-option input {
+    cursor: not-allowed;
+  }
   input[type="radio"] { accent-color: var(--em-accent); }
 
   /* Checkbox grid */
@@ -348,11 +355,26 @@
     <div class="form-section">
       <div class="section-title">Dimming</div>
       <div class="radio-group">
-        <label><input type="radio" name="dimming" value="" checked onchange="updatePreview()"> No Dimming</label>
-        <label><input type="radio" name="dimming" value="D1"   onchange="updatePreview()"> Dimming (D1-HEP)</label>
-        <label><input type="radio" name="dimming" value="D2"   onchange="updatePreview()"> Dimming (D2-Triac)</label>
-        <label><input type="radio" name="dimming" value="AK"   onchange="updatePreview()"> Ava</label>
-        <label><input type="radio" name="dimming" value="KC"   onchange="updatePreview()"> Keen</label>
+        <label><input type="radio" name="dimming" value="" checked onchange="toggleDimmingOptions(); updatePreview()"> No Dimming</label>
+        <label><input type="radio" name="dimming" value="D1"   onchange="toggleDimmingOptions(); updatePreview()"> Dimming (D1-HEP)</label>
+        <label><input type="radio" name="dimming" value="D2"   onchange="toggleDimmingOptions(); updatePreview()"> Dimming (D2-Triac)</label>
+        <label class="disabled-option"><input type="radio" name="dimming" value="AK" disabled onchange="toggleDimmingOptions(); updatePreview()"> Ava</label>
+        <label style="display: inline-flex; align-items: center; gap: 5px;">
+          <input type="radio" name="dimming" value="KC" onchange="toggleDimmingOptions(); updatePreview()"> Keen
+          <span id="divKeenOptions" onclick="event.stopPropagation()" style="display: none; align-items: center; gap: 6px; margin-left: 8px;">
+            <select id="selKeenType" onchange="updatePreview()" style="padding: 2px 4px; font-size: 0.75rem; height: auto;">
+              <option value="KC" selected>KC</option>
+              <option value="KD">KD</option>
+              <option value="KG">KG</option>
+              <option value="KH">KH</option>
+            </select>
+            <select id="selKeenLocation" onchange="updatePreview()" style="padding: 2px 4px; font-size: 0.75rem; height: auto;">
+              <option value="Right">Right</option>
+              <option value="Center" selected>Center</option>
+              <option value="Left">Left</option>
+            </select>
+          </span>
+        </label>
       </div>
     </div>
 
@@ -362,29 +384,45 @@
     <div class="form-section">
       <div class="section-title">Options</div>
       <div class="checkbox-grid">
-        <label class="checkbox-item">
-          <input type="checkbox" id="chkSavvy"        onchange="updatePreview()"> Savvy
+        <label class="checkbox-item disabled-option">
+          <input type="checkbox" id="chkSavvy"        disabled onchange="updatePreview()"> Savvy
         </label>
         <label class="checkbox-item">
-          <input type="checkbox" id="chkCordConnect"  onchange="updatePreview()"> Cord Connect
+          <input type="checkbox" id="chkCordConnect"  onchange="toggleCordConnect(); updatePreview()"> Cord Connect
+          <select id="selCordConnectType" onchange="updatePreview()" onclick="event.stopPropagation()" style="margin-left: 8px; display: none; padding: 2px 4px; font-size: 0.75rem; height: auto;">
+            <option value="CC" selected>CC</option>
+            <option value="CC2">CC2</option>
+          </select>
         </label>
         <label class="checkbox-item">
-          <input type="checkbox" id="chkClock"        onchange="updatePreview()"> Clock
+          <input type="checkbox" id="chkClock"        onchange="toggleClock(); updatePreview()"> Clock
+          <span id="divClockOptions" onclick="event.stopPropagation()" style="display: none; align-items: center; gap: 6px; margin-left: 8px;">
+            <select id="selClockType" onchange="updatePreview()" style="padding: 2px 4px; font-size: 0.75rem; height: auto;">
+              <option value="CK1" selected>CK1</option>
+              <option value="CK2">CK2</option>
+              <option value="CK3">CK3</option>
+            </select>
+            <select id="selClockLocation" onchange="updatePreview()" style="padding: 2px 4px; font-size: 0.75rem; height: auto;">
+              <option value="Right" selected>Right</option>
+              <option value="Center">Center</option>
+              <option value="Left">Left</option>
+            </select>
+          </span>
         </label>
         <label class="checkbox-item">
           <input type="checkbox" id="chkDefogger"     onchange="updatePreview()"> Defogger
         </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="chkNonBrilliant" onchange="updatePreview()"> Non Brilliant
+        <label class="checkbox-item disabled-option">
+          <input type="checkbox" id="chkNonBrilliant" disabled onchange="updatePreview()"> Non Brilliant
         </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="chkNightLight"   onchange="updatePreview()"> Night Light
+        <label class="checkbox-item disabled-option">
+          <input type="checkbox" id="chkNightLight"   disabled onchange="updatePreview()"> Night Light
         </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="chkTV"           onchange="updatePreview()"> TV
+        <label class="checkbox-item disabled-option">
+          <input type="checkbox" id="chkTV"           disabled onchange="updatePreview()"> TV
         </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="chkVive"         onchange="updatePreview()"> Vive
+        <label class="checkbox-item disabled-option">
+          <input type="checkbox" id="chkVive"         disabled onchange="updatePreview()"> Vive
         </label>
         <label class="checkbox-item">
           <input type="checkbox" id="chkWallGlow"     onchange="updatePreview()"> Wall Glow
@@ -411,9 +449,14 @@
   let previewTimer = null;
 
   function getFormData() {
-    const dimming = document.querySelector('input[name="dimming"]:checked')?.value || "";
+    let dimming = document.querySelector('input[name="dimming"]:checked')?.value || "";
+    const isKeen  = (dimming === "KC");
+    let keenLocation = "Center";
+    if (isKeen) {
+      dimming = document.getElementById('selKeenType').value;
+      keenLocation = document.getElementById('selKeenLocation').value;
+    }
     const isAva   = ["AC","AD","AE","AF","AK"].includes(dimming);
-    const isKeen  = ["KC","KD","KG","KH"].includes(dimming);
 
     return {
       UnitWidth:       parseFloat(document.getElementById('unitWidth').value)  || 36,
@@ -426,10 +469,12 @@
       DimmingType:     dimming,
       Ava:             isAva,
       Keen:            isKeen,
+      KeenLocation:    keenLocation,
       Clock:           document.getElementById('chkClock').checked,
-      ClockType:       document.getElementById('chkClock').checked ? "CK1" : "",
+      ClockType:       document.getElementById('chkClock').checked ? document.getElementById('selClockType').value : "",
+      ClockLocation:   document.getElementById('chkClock').checked ? document.getElementById('selClockLocation').value : "Right",
       CordConnect:     document.getElementById('chkCordConnect').checked,
-      CordConnectType: document.getElementById('chkCordConnect').checked ? "CC" : "",
+      CordConnectType: document.getElementById('chkCordConnect').checked ? document.getElementById('selCordConnectType').value : "",
       Defogger:        document.getElementById('chkDefogger').checked,
       NightLight:      document.getElementById('chkNightLight').checked,
       NightLightType:  document.getElementById('chkNightLight').checked ? "NL1" : "",
@@ -513,12 +558,58 @@
       document.getElementById('unitHeight').value = 36;
       document.querySelector('input[name="dimming"][value=""]').checked = true;
       document.querySelectorAll('input[type="checkbox"]').forEach(c => c.checked = false);
+      
+      // Reset dropdown values to defaults
+      const selType = document.getElementById('selClockType');
+      if (selType) selType.value = "CK1";
+      const selLoc = document.getElementById('selClockLocation');
+      if (selLoc) selLoc.value = "Right";
+      const selCC = document.getElementById('selCordConnectType');
+      if (selCC) selCC.value = "CC";
+      
+      const selKeenType = document.getElementById('selKeenType');
+      if (selKeenType) selKeenType.value = "KC";
+      const selKeenLoc = document.getElementById('selKeenLocation');
+      if (selKeenLoc) selKeenLoc.value = "Center";
+
+      toggleCordConnect();
+      toggleClock();
+      toggleDimmingOptions();
       updatePreview();
     }
   }
 
+  function toggleCordConnect() {
+    const chk = document.getElementById('chkCordConnect');
+    const sel = document.getElementById('selCordConnectType');
+    if (chk && sel) {
+      sel.style.display = chk.checked ? 'inline-block' : 'none';
+    }
+  }
+
+  function toggleClock() {
+    const chk = document.getElementById('chkClock');
+    const div = document.getElementById('divClockOptions');
+    if (chk && div) {
+      div.style.display = chk.checked ? 'inline-flex' : 'none';
+    }
+  }
+
+  function toggleDimmingOptions() {
+    const keenRadio = document.querySelector('input[name="dimming"][value="KC"]');
+    const div = document.getElementById('divKeenOptions');
+    if (keenRadio && div) {
+      div.style.display = keenRadio.checked ? 'inline-flex' : 'none';
+    }
+  }
+
   // Initial preview on load
-  window.addEventListener('load', updatePreview);
+  window.addEventListener('load', () => {
+    toggleCordConnect();
+    toggleClock();
+    toggleDimmingOptions();
+    updatePreview();
+  });
 </script>
 </body>
 </html>
