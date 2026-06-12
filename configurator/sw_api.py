@@ -1443,31 +1443,7 @@ class SolidWorksAPI:
                             
                         if view.Name.lower() == "drawing view5":
                             try:
-                                outline = view.GetOutline
-                                if outline:
-                                    xMin, yMin, xMax, yMax = outline[0], outline[1], outline[2], outline[3]
-                                    h = yMax - yMin
-                                    clearInner = 0.008
-                                    clearOuter = 0.0125
-                                    
-                                    disp_dim = view.GetFirstDisplayDimension5
-                                    while disp_dim:
-                                        dim = disp_dim.GetDimension2(0)
-                                        if dim:
-                                            dim_name = dim.Name.upper()
-                                            ann = disp_dim.GetAnnotation
-                                            if ann:
-                                                if "RD2" in dim_name:
-                                                    x = xMax + clearOuter
-                                                    y = yMax + 0.14 * h
-                                                    ann.SetPosition(x, y, 0.0)
-                                                    log.info(f"Dynamically positioned RD2 to X={x:.4f}m, Y={y:.4f}m")
-                                                elif "RD1" in dim_name:
-                                                    x = xMax + clearInner
-                                                    y = yMax + 0.01 * h
-                                                    ann.SetPosition(x, y, 0.0)
-                                                    log.info(f"Dynamically positioned RD1 to X={x:.4f}m, Y={y:.4f}m")
-                                        disp_dim = disp_dim.GetNext5
+                                self._reposition_view5_dimensions(swDrawing)
                             except Exception as ed5:
                                 log.error(f"Failed to reposition dimensions on Drawing View5: {ed5}")
                         view = view.GetNextView
@@ -1492,6 +1468,118 @@ class SolidWorksAPI:
                         
         except Exception as e:
             log.error(f"Error during Sheet/View note traversal: {e}")
+
+    def _reposition_view5_dimensions(self, swDrawing):
+        log.info("Starting deterministic Drawing View5 dimension repositioning...")
+        
+        # 1. Configuration Constants (in inches)
+        DEPTH_STANDOFF = 0.377
+        ROW_GAP = 0.335
+        TEXT_OUT_DEPTH = 0.34
+        TEXT_OUT_OFF = 0.52
+        
+        # 2. Query outlines of Drawing View5 and Drawing View6
+        view5 = None
+        view6 = None
+        
+        view = swDrawing.GetFirstView
+        while view:
+            vname = view.Name.lower()
+            if "drawing view5" in vname:
+                view5 = view
+            elif "drawing view6" in vname:
+                view6 = view
+            view = view.GetNextView
+            
+        if not view5:
+            log.warning("Drawing View5 not found on Sheet 1. Skipping dimension repositioning.")
+            return
+            
+        # Get View5 outline in meters
+        outline5 = view5.GetOutline
+        if not outline5:
+            log.warning("Could not retrieve outline for Drawing View5.")
+            return
+            
+        x5min, y5min, x5max, y5max = outline5[0], outline5[1], outline5[2], outline5[3]
+        view5_centerX = (x5min + x5max) / 2.0
+        view5_top = y5max
+        
+        # 3. Traversal of View5's Display Dimensions to identify Depth and Offset
+        dims_list = []
+        disp_dim = view5.GetFirstDisplayDimension5
+        while disp_dim:
+            dim = disp_dim.GetDimension2(0)
+            ann = disp_dim.GetAnnotation
+            if dim and ann:
+                val = dim.SystemValue # value in meters
+                dims_list.append((val, ann))
+            disp_dim = disp_dim.GetNext5
+            
+        if len(dims_list) < 2:
+            log.warning(f"Expected at least 2 dimensions on View5, found {len(dims_list)}.")
+            if not dims_list:
+                return
+            # If only 1, treat it as depth
+            offset_ann = None
+            depth_ann = dims_list[0][1]
+        else:
+            # Sort by value (system units, meters) to rank them
+            dims_list.sort(key=lambda item: item[0])
+            offset_ann = dims_list[0][1]
+            depth_ann = dims_list[1][1]
+            
+        # 4. Calculate target coordinates in meters
+        depthX = view5_centerX + TEXT_OUT_DEPTH * 0.0254
+        depthY = view5_top + DEPTH_STANDOFF * 0.0254
+        
+        offX = view5_centerX + TEXT_OUT_OFF * 0.0254
+        offY = depthY - ROW_GAP * 0.0254
+        
+        # 5. Apply positions
+        if depth_ann:
+            depth_ann.SetPosition(depthX, depthY, 0.0)
+            log.info(f"Positioned Depth dimension at X={depthX*39.3701:.4f}\", Y={depthY*39.3701:.4f}\"")
+        if offset_ann:
+            offset_ann.SetPosition(offX, offY, 0.0)
+            log.info(f"Positioned Offset dimension at X={offX*39.3701:.4f}\", Y={offY*39.3701:.4f}\"")
+            
+        # 6. Rebuild and Readback Verification
+        swDrawing.ForceRebuild3(False)
+        
+        # Log readback positions in inches
+        if depth_ann:
+            depth_pos = depth_ann.GetPosition
+            if depth_pos:
+                log.info(f"Verified Depth dimension position: X={depth_pos[0]*39.3701:.4f}\", Y={depth_pos[1]*39.3701:.4f}\"")
+        if offset_ann:
+            offset_pos = offset_ann.GetPosition
+            if offset_pos:
+                log.info(f"Verified Offset dimension position: X={offset_pos[0]*39.3701:.4f}\", Y={offset_pos[1]*39.3701:.4f}\"")
+                
+        # Safety Check against Drawing View6 outline
+        if view6:
+            outline6 = view6.GetOutline
+            if outline6:
+                x6min, y6min, x6max, y6max = outline6[0], outline6[1], outline6[2], outline6[3]
+                # Text width/height approximations in meters
+                dim_w_m = 1.0 * 0.0254
+                dim_h_m = 0.22 * 0.0254
+                MARGIN_M = 0.15 * 0.0254
+                
+                # Rects: [xMin, yMin, xMax, yMax]
+                depth_rect = [depthX, depthY - dim_h_m, depthX + dim_w_m, depthY]
+                offset_rect = [offX, offY - dim_h_m, offX + dim_w_m, offY]
+                
+                v6_buffer = [x6min - MARGIN_M, y6min - MARGIN_M, x6max + MARGIN_M, y6max + MARGIN_M]
+                
+                def intersects(r1, r2):
+                    return not (r1[2] < r2[0] or r1[0] > r2[2] or r1[3] < r2[1] or r1[1] > r2[3])
+                    
+                if intersects(depth_rect, v6_buffer) or intersects(offset_rect, v6_buffer):
+                    log.warning("SAFETY WARNING: Repositioned dimensions intersect Drawing View6 outline buffer!")
+                else:
+                    log.info("Safety check passed: dimensions do not overlap Drawing View6 outline.")
 
     def _update_sketch34_dimensions(self, swDrawing, W: float, H: float, powerBoxY: float, hangerY: float):
         log.info("Updating Sheet 2 Sketch34 mounting dimensions...")
