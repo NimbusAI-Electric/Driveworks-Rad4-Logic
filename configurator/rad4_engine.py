@@ -108,7 +108,7 @@ class RAD4Inputs:
     MountType:   str   = "RM"   # "RM" = Recessed Mount, "SM" = Surface Mount
 
     # Lighting  (RAD4-specific — JS3 Parent.csv line 2330)
-    Lighting:    str   = "LO"   # "LO", "SO"
+    Lighting:    str   = "LSE"  # "LO", "SO", "LSE", "LHE"
 
     # LED colour temperature
     LEDColorTemp: str  = "30K"  # "27K", "30K", "35K", "40K"
