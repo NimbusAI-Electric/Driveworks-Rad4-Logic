@@ -11,6 +11,8 @@ and diffusers (64792), updating their length dimensions, and referencing them.
 """
 
 import os
+import sys
+import math
 import shutil
 import glob
 import logging
@@ -18,7 +20,15 @@ import re
 from pathlib import Path
 import win32com.client as win32
 import pythoncom
-from rad4_engine import RAD4Inputs, RAD4Result, DWConstantVault
+from rad4_engine import RAD4Inputs, RAD4Result, DWConstantVault, NoteBlock
+
+# Add bundle code path to sys.path
+bundle_code_path = str(Path(__file__).parent / "RAD4_Configurator_Bundle" / "code")
+if bundle_code_path not in sys.path:
+    sys.path.insert(0, bundle_code_path)
+
+from rad4_scale_dynamic import scale_page_1, scale_page_2
+
 
 log = logging.getLogger(__name__)
 
@@ -717,8 +727,9 @@ class SolidWorksAPI:
             parsed_notes = _get_drawing_notes_from_opts(width, height, opts)
             num_notes = len(parsed_notes)
             
-            p1_scale = self._calculate_page_1_scale(width, height, num_notes)
-            p2_scale = self._calculate_page_2_scale(width, height, max(1, num_notes - 2))
+            p1_scale = scale_page_1(width, height, num_notes)
+            p2_scale = scale_page_2(width, height, max(1, num_notes - 2))
+
             log.info(f"Applying scales Page 1 (1:{p1_scale}), Page 2 (1:{p2_scale}) to drawing sheets.")
             
             sheet_names = swDrawing.GetSheetNames
@@ -1242,13 +1253,10 @@ class SolidWorksAPI:
         lm_ft = 302.0
         total_lumens = round(result.LEDCutLengthIn * lm_ft / 12.0)
         
-        opts = parse_cpn_options(result.CPN)
-        parsed_notes = _get_drawing_notes_from_opts(inp.UnitWidth, inp.UnitHeight, opts)
-
         # Calculate dynamic page scales for the scale notes
-        num_notes = len(parsed_notes)
-        p1_scale = self._calculate_page_1_scale(inp.UnitWidth, inp.UnitHeight, num_notes)
-        p2_scale = self._calculate_page_2_scale(inp.UnitWidth, inp.UnitHeight, max(1, num_notes - 2))
+        num_notes = len(result.Notes)
+        p1_scale = scale_page_1(inp.UnitWidth, inp.UnitHeight, num_notes)
+        p2_scale = scale_page_2(inp.UnitWidth, inp.UnitHeight, max(1, num_notes - 2))
 
         # 1. Main specs block
         if inp.Voltage == "277V":
@@ -1268,9 +1276,10 @@ class SolidWorksAPI:
             f"CRI: 90+"
         )
         
-        if "DEFOGGER" in parsed_notes:
+        defogger_note = next((n for n in result.Notes if n.category == "DEFOGGER"), None)
+        if defogger_note:
             pad_size, _ = self._parse_defogger_config(result.DefoggerConfig)
-            wattage_str = parsed_notes["DEFOGGER"].split(":")[-1].strip()
+            wattage_str = defogger_note.body_text.split(":")[-1].strip()
             spec_text += (
                 f"\n\nDEFOGGER SPECIFICATION:\n"
                 f"WATTAGE: {wattage_str.split('@')[0].strip()}\n"
@@ -1281,38 +1290,7 @@ class SolidWorksAPI:
             f"\n\nFIXTURE SPECIFICATION:\n"
             f"WEIGHT: $PRPSHEET:\"Weight\" LBS (EST.)"
         )
-        
-        # 2. Spec instructions block
-        spec_inst = "SPECIFICATION:\n" + parsed_notes.get("SPECIFICATION", "")
-        if "ATTENTION" in parsed_notes:
-            spec_inst += "\n\nATTENTION:\n" + parsed_notes["ATTENTION"]
-        if "DEFOGGER DISCLAIMER (KEEN)" in parsed_notes:
-            spec_inst += "\n\nKEEN / DEFOGGER DISCLAIMER:\n" + parsed_notes["DEFOGGER DISCLAIMER (KEEN)"]
-            
-        # 3. Dimming compatibility
-        dimmer_text = parsed_notes.get("DIMMING", "")
-        if dimmer_text:
-            dimmer_text = "DIMMER COMPATIBILITY:\n" + dimmer_text
-            
-        # 4. Defogger detail
-        defogger_text = ""
-        outline_text = ""
-        if "DEFOGGER" in parsed_notes:
-            pad_size, _ = self._parse_defogger_config(result.DefoggerConfig)
-            wattage_str = parsed_notes["DEFOGGER"].split(":")[-1].strip()
-            defogger_text = f"DEFOGGER SPECIFICATIONS:\n{pad_size}\n{wattage_str}"
-            outline_text = f"OUTLINE OF\nDEFOGGER\n{pad_size}"
-            
-        # 5. Button Callout
-        if inp.Keen:
-            button_text = "KEEN 1-TOUCH CONTROL BUTTON\nSEE SPECIFICATION SHEET\nFOR ADDITIONAL DETAILS"
-        elif inp.Ava:
-            button_text = "AVA 1-TOUCH CONTROL BUTTON\nSEE SPECIFICATION SHEET\nFOR ADDITIONAL DETAILS"
-        elif inp.Vive:
-            button_text = "VIVE CONTROL BUTTON\nSEE SPECIFICATION SHEET\nFOR ADDITIONAL DETAILS"
-        else:
-            button_text = ""
-            
+
         # Perform drawing sheet traversal
         try:
             sheet_names = swDrawing.GetSheetNames
@@ -1320,271 +1298,200 @@ class SolidWorksAPI:
                 swDrawing.ActivateSheet(s_name)
                 current_scale = p1_scale if idx == 0 else p2_scale
                 
-                view = swDrawing.GetFirstView
-                while view:
+                # Sheet 1: clear placeholder note and insert the active note stack
+                if idx == 0:
+                    placeholder_ann = None
+                    placeholder_pos = (4.58 / 39.3701, 8.11 / 39.3701, 0.0)
+                    notes_to_clear = []
+                    
+                    view = swDrawing.GetFirstView # Sheet view
                     note = view.GetFirstNote
                     while note:
-                        text = note.GetText
                         name = note.GetName
+                        text = note.GetText
                         text_lower = text.lower() if text else ""
-                        
-                        # Apply rules based on text content and name matches
-                        updated = False
+                        ann = note.GetAnnotation
                         
                         # Rule 0: Title block scale note
                         if name == "DetailItem371" or text_lower.startswith("scale:"):
                             note.SetText(f"SCALE: 1:{current_scale}")
                             log.info(f"Updated scale note '{name}' on sheet '{s_name}' to 'SCALE: 1:{current_scale}'")
-                            updated = True
                             
-                        # Rule 1: Main specs block
+                        # Rule 1: Main specs block (DetailItem378)
                         elif name == "DetailItem378" or ("power requirements:" in text_lower and "led specification:" in text_lower):
                             note.SetText(spec_text)
                             log.info(f"Updated main specs block '{name}' on sheet '{s_name}'")
-                            if idx == 0:
-                                try:
-                                    ann = note.GetAnnotation
-                                    if ann:
-                                        ann.SetPosition(7.96 / 39.3701, 8.12 / 39.3701, 0.0)
-                                        log.info(f"Repositioned specs block '{name}' on sheet '{s_name}' to top (X=7.96\", Y=8.12\")")
-                                except Exception as ep:
-                                    log.error(f"Failed to reposition specs block '{name}': {ep}")
-                            updated = True
-                            
-                        # Rule 2: Spec instructions
+                            try:
+                                if ann:
+                                    ann.SetPosition(7.96 / 39.3701, 8.12 / 39.3701, 0.0)
+                            except Exception as ep:
+                                log.error(f"Failed to reposition specs block '{name}': {ep}")
+                                
+                        # Rule 2: Placeholder spec instructions DetailItem436
                         elif name in ("DetailItem436", "DetailItem435", "DetailItem434") or ("specification:" in text_lower and "bring mc cable" in text_lower):
-                            note.SetText(spec_inst)
-                            log.info(f"Updated spec instructions '{name}' on sheet '{s_name}'")
-                            if idx == 0:
+                            placeholder_ann = ann
+                            if ann:
+                                pos = ann.GetPosition
+                                if pos:
+                                    placeholder_pos = pos
+                            notes_to_clear.append(ann)
+                            
+                        # Standalone legacy notes to avoid duplicates on Sheet 1
+                        elif ("earth ground in\naccordance with nec" in text_lower or 
+                              "earth ground in\r\naccordance with nec" in text_lower or
+                              "keen / defogger disclaimer:" in text_lower or
+                              "dimmer compatibility:" in text_lower):
+                            notes_to_clear.append(ann)
+                            
+                        note = note.GetNext
+                    
+                    # Delete placeholder and legacy notes
+                    if notes_to_clear:
+                        swDrawing.ClearSelection2(True)
+                        for ann in notes_to_clear:
+                            try:
+                                ann.Select2(True, 0)
+                            except Exception as es:
+                                log.error(f"Failed to select note: {es}")
+                        swDrawing.Extension.DeleteSelection2(0)
+                        log.info("Cleared placeholder and legacy notes from Sheet 1.")
+                                      # Insert active NoteBlock stack
+                    try:
+                        sheet = swDrawing.GetCurrentSheet
+                        props = sheet.GetProperties2
+                        sheet_width = props[5]
+                        sheet_height = props[6]
+                        log.info(f"Retrieved Sheet 1 properties: Width={sheet_width*39.3701:.4f}\", Height={sheet_height*39.3701:.4f}\"")
+                    except Exception as esh:
+                        log.error(f"Failed to get sheet size properties: {esh}")
+                        sheet_height = 11.0 * 0.0254
+                        
+                    X_start = 4.586 * 0.0254
+                    Y_current = sheet_height - (0.365 * 0.0254)
+                    gap = 0.15 / 39.3701 # gap of 0.15 inches in meters
+                    line_height = 0.18 / 39.3701 # approx line height in meters
+                    
+                    import textwrap
+                    for block in result.Notes:
+                        # Wrap body text to fit ~3 inches (around 45 characters)
+                        wrapped_body = "\n".join(textwrap.wrap(block.body_text, width=45))
+                        plain_text = f"{block.title.upper()}:\n{wrapped_body}"
+                        
+                        new_note = swDrawing.InsertNote(plain_text)
+                        if new_note:
+                            try:
+                                new_note.SetTextJustification(1) # swTextJustificationLeft = 1
+                                new_note.SetTextVerticalJustification(3) # swTextAlignmentTop = 3
+                            except Exception as ejust:
+                                log.error(f"Failed to set note justification: {ejust}")
+                                
+                            new_ann = new_note.GetAnnotation
+                            if new_ann:
+                                new_ann.SetPosition(X_start, Y_current, 0.0)
                                 try:
-                                    ann = note.GetAnnotation
-                                    if ann:
-                                        ann.SetPosition(4.58 / 39.3701, 8.11 / 39.3701, 0.0)
-                                        log.info(f"Repositioned spec instructions '{name}' on sheet '{s_name}' to top (X=4.58\", Y=8.11\")")
-                                except Exception as ep:
-                                    log.error(f"Failed to reposition spec instructions '{name}': {ep}")
-                            updated = True
+                                    tf = new_ann.GetTextFormat(0)
+                                    if tf:
+                                        tf.TypefaceName = "Century Gothic"
+                                        tf.CharHeight = 1.852 / 1000.0  # 1.852 mm in meters
+                                        tf.Bold = False
+                                        tf.Italic = False
+                                        tf.Underline = False
+                                        new_ann.SetTextFormat(0, False, tf)
+                                        log.info(f"Applied Century Gothic 1.852mm Regular to dynamic note '{block.category}'")
+                                except Exception as etf:
+                                    log.error(f"Failed to set text format for note '{block.category}': {etf}")
+                                    
+                                # Verify position by reading it back
+                                try:
+                                    check_pos = new_ann.GetPosition
+                                    if check_pos:
+                                        log.info(f"Verified note '{block.category}' position: X={check_pos[0]*39.3701:.4f}\", Y={check_pos[1]*39.3701:.4f}\"")
+                                except Exception as epos:
+                                    log.error(f"Failed to read back note position: {epos}")
                             
-                        # Rule 3: Dimmer compatibility
-                        elif name == "DetailItem409" or name == "DetailItem432" or "dimmer compatibility:" in text_lower:
-                            note.SetText(dimmer_text)
-                            log.info(f"Updated dimmer compatibility '{name}' on sheet '{s_name}'")
-                            updated = True
+                            # Estimate height based on actual line count
+                            lines = wrapped_body.count("\n") + 2
+                            note_height = lines * line_height
+                            Y_current = Y_current - note_height - gap
+                            log.info(f"Inserted note block '{block.category}' next Y={Y_current * 39.3701:.4f}\"")
+                        else:
+                            log.error(f"Failed to insert note for category: {block.category}")
+                    
+                    # Reposition dimensions on Drawing View5 (Sheet 1)
+                    view = swDrawing.GetFirstView
+                    while view:
+                        note = view.GetFirstNote
+                        while note:
+                            text = note.GetText
+                            text_lower = text.lower() if text else ""
+                            # Rule 8: OFF WALL note on Drawing View5
+                            if "off wall" in text_lower and view.Name.lower() == "drawing view5":
+                                try:
+                                    outline = view.GetOutline
+                                    if outline:
+                                        xMax, yMax = outline[2], outline[3]
+                                        h = yMax - outline[1]
+                                        ann = note.GetAnnotation
+                                        if ann:
+                                            x = xMax + 0.008
+                                            y = (yMax + 0.01 * h) - 0.006
+                                            ann.SetPosition(x, y, 0.0)
+                                            log.info(f"Dynamically positioned OFF WALL note to X={x:.4f}m, Y={y:.4f}m")
+                                except Exception as en5:
+                                    log.error(f"Failed to reposition OFF WALL note: {en5}")
+                            note = note.GetNext
                             
-                        # Rule 4: Defogger specifications box
-                        elif name == "DetailItem415" or "defogger specifications:" in text_lower or (text_lower.strip().startswith("defogger:") and "wattage:" in text_lower):
-                            note.SetText(defogger_text)
-                            log.info(f"Updated defogger spec box '{name}' on sheet '{s_name}'")
-                            updated = True
-                            
-                        # Rule 5: Defogger outline callout
-                        elif name == "DetailItem392" or "outline of\ndefogger" in text_lower or "outline of\r\ndefogger" in text_lower:
-                            note.SetText(outline_text)
-                            log.info(f"Updated defogger outline '{name}' on sheet '{s_name}'")
-                            updated = True
-                            
-                        # Rule 6: Touch button callout
-                        elif name == "DetailItem437" or "1-touch control" in text_lower or "control button" in text_lower:
-                            note.SetText(button_text)
-                            log.info(f"Updated touch button callout '{name}' on sheet '{s_name}'")
-                            updated = True
-                            
-                        # Rule 8: OFF WALL note on Drawing View5
-                        elif "off wall" in text_lower and view.Name.lower() == "drawing view5":
+                        if view.Name.lower() == "drawing view5":
                             try:
                                 outline = view.GetOutline
                                 if outline:
-                                    xMax, yMax = outline[2], outline[3]
-                                    h = yMax - outline[1]
-                                    ann = note.GetAnnotation
-                                    if ann:
-                                        x = xMax + 0.008
-                                        y = (yMax + 0.01 * h) - 0.006
-                                        ann.SetPosition(x, y, 0.0)
-                                        log.info(f"Dynamically positioned OFF WALL note to X={x:.4f}m, Y={y:.4f}m")
-                                        updated = True
-                            except Exception as en5:
-                                log.error(f"Failed to reposition OFF WALL note: {en5}")
+                                    xMin, yMin, xMax, yMax = outline[0], outline[1], outline[2], outline[3]
+                                    h = yMax - yMin
+                                    clearInner = 0.008
+                                    clearOuter = 0.0125
+                                    
+                                    disp_dim = view.GetFirstDisplayDimension5
+                                    while disp_dim:
+                                        dim = disp_dim.GetDimension2(0)
+                                        if dim:
+                                            dim_name = dim.Name.upper()
+                                            ann = disp_dim.GetAnnotation
+                                            if ann:
+                                                if "RD2" in dim_name:
+                                                    x = xMax + clearOuter
+                                                    y = yMax + 0.14 * h
+                                                    ann.SetPosition(x, y, 0.0)
+                                                    log.info(f"Dynamically positioned RD2 to X={x:.4f}m, Y={y:.4f}m")
+                                                elif "RD1" in dim_name:
+                                                    x = xMax + clearInner
+                                                    y = yMax + 0.01 * h
+                                                    ann.SetPosition(x, y, 0.0)
+                                                    log.info(f"Dynamically positioned RD1 to X={x:.4f}m, Y={y:.4f}m")
+                                        disp_dim = disp_dim.GetNext5
+                            except Exception as ed5:
+                                log.error(f"Failed to reposition dimensions on Drawing View5: {ed5}")
+                        view = view.GetNextView
+                        
+                else:
+                    # Sheet 2: Only update scale note in place, do not remove/alter other notes
+                    view = swDrawing.GetFirstView
+                    while view:
+                        note = view.GetFirstNote
+                        while note:
+                            text = note.GetText
+                            name = note.GetName
+                            text_lower = text.lower() if text else ""
                             
-                        # Rule 7: Clean up duplicates (clear standalone warning notes since they are now appended to spec_inst)
-                        elif not updated:
-                            if "earth ground in\naccordance with nec" in text_lower or "earth ground in\r\naccordance with nec" in text_lower:
-                                note.SetText("")
-                                log.info(f"Cleared standalone grounding warning '{name}' to avoid duplicate")
-                            elif "keen / defogger disclaimer:" in text_lower:
-                                note.SetText("")
-                                log.info(f"Cleared standalone keen disclaimer '{name}' to avoid duplicate")
+                            # Rule 0: Title block scale note
+                            if name == "DetailItem371" or text_lower.startswith("scale:"):
+                                note.SetText(f"SCALE: 1:{current_scale}")
+                                log.info(f"Updated scale note '{name}' on sheet '{s_name}' to 'SCALE: 1:{current_scale}'")
                                 
-                        note = note.GetNext
-                    
-                    # Reposition dimensions on Drawing View5
-                    if view.Name.lower() == "drawing view5":
-                        try:
-                            outline = view.GetOutline
-                            if outline:
-                                xMin, yMin, xMax, yMax = outline[0], outline[1], outline[2], outline[3]
-                                h = yMax - yMin
-                                clearInner = 0.008
-                                clearOuter = 0.0125
-                                
-                                disp_dim = view.GetFirstDisplayDimension5
-                                while disp_dim:
-                                    dim = disp_dim.GetDimension2
-                                    if dim:
-                                        dim_name = dim.Name.upper()
-                                        ann = disp_dim.GetAnnotation
-                                        if ann:
-                                            if "RD2" in dim_name:
-                                                x = xMax + clearOuter
-                                                y = yMax + 0.14 * h
-                                                ann.SetPosition(x, y, 0.0)
-                                                log.info(f"Dynamically positioned RD2 to X={x:.4f}m, Y={y:.4f}m")
-                                            elif "RD1" in dim_name:
-                                                x = xMax + clearInner
-                                                y = yMax + 0.01 * h
-                                                ann.SetPosition(x, y, 0.0)
-                                                log.info(f"Dynamically positioned RD1 to X={x:.4f}m, Y={y:.4f}m")
-                                    disp_dim = disp_dim.GetNext5
-                        except Exception as ed5:
-                            log.error(f"Failed to reposition dimensions on Drawing View5: {ed5}")
-                            
-                    view = view.GetNextView
+                            note = note.GetNext
+                        view = view.GetNextView
+                        
         except Exception as e:
             log.error(f"Error during Sheet/View note traversal: {e}")
-
-    def _calculate_page_1_scale(self, width: float, height: float, num_notes: int) -> int:
-        LADDER = [8, 10, 12, 14, 16, 18, 20, 24]
-        SHEET_W = 17.0
-        SHEET_H = 11.0
-        TITLE_BLOCK_H = 1.25
-        MARGIN = 0.40
-        PAGE_SEP_H = 0.20
-        NOTE_AVG_H = 1.50
-        NOTES_COL_BASE_W = 2.80
-        NOTES_COL_GROWTH_W = 0.30
-        P1_SIDE_VIEW_W = 1.20
-        P1_DIM_LEADER_W = 1.20
-        P1_DIM_LEADER_H = 1.20
-        CONVENTIONAL_TARGET_BASE = 4.25
-        CONVENTIONAL_NOTES_DROP = 0.08
-        CONVENTIONAL_WIDE_BONUS = 0.25
-        CONVENTIONAL_SQUARE_DROP = 0.40
-        CONVENTIONAL_VERTICAL_PB = 0.05
-        GEOMETRY_SAFETY = 1.10
-
-        pb = "horizontal" if width >= 22.0 else "vertical"
-        
-        # Notes column width
-        notes_w = 0.0
-        if num_notes > 0:
-            notes_w = NOTES_COL_BASE_W + NOTES_COL_GROWTH_W * (num_notes - 1)
-            col_h_avail = SHEET_H - TITLE_BLOCK_H - 2 * MARGIN
-            needed_h = num_notes * NOTE_AVG_H
-            if needed_h > col_h_avail:
-                notes_w *= (needed_h / col_h_avail)
-            notes_w = min(notes_w, 6.0)
-
-        # Clear area
-        clear_w = SHEET_W - 2 * MARGIN - notes_w - PAGE_SEP_H
-        clear_h = SHEET_H - TITLE_BLOCK_H - 2 * MARGIN
-        view_w = clear_w - P1_SIDE_VIEW_W - P1_DIM_LEADER_W
-        view_h = clear_h - P1_DIM_LEADER_H
-
-        n_required = max(width / max(0.5, view_w), height / max(0.5, view_h)) * GEOMETRY_SAFETY
-
-        # Conventional target
-        t = CONVENTIONAL_TARGET_BASE - CONVENTIONAL_NOTES_DROP * max(0, num_notes - 1)
-        r = width / height if height > 0 else 1.0
-        if r >= 1.2:
-            t += CONVENTIONAL_WIDE_BONUS
-        elif r <= 1/1.2:
-            pass
-        else:
-            t -= CONVENTIONAL_SQUARE_DROP
-        if pb == "vertical":
-            t -= CONVENTIONAL_VERTICAL_PB
-        target = max(2.5, t)
-        
-        n_preferred = max(width, height) / target
-        
-        raw_n = max(n_required, n_preferred)
-        if raw_n <= 0:
-            return LADDER[0]
-        for s in LADDER:
-            if s >= raw_n:
-                return s
-        return LADDER[-1]
-
-    def _calculate_page_2_scale(self, width: float, height: float, num_notes_p2: int) -> int:
-        LADDER = [8, 10, 12, 14, 16, 18, 20, 24]
-        SHEET_W = 17.0
-        SHEET_H = 11.0
-        TITLE_BLOCK_H = 1.25
-        MARGIN = 0.40
-        PAGE_SEP_H = 0.20
-        NOTE_AVG_H = 1.50
-        NOTES_COL_BASE_W = 2.80
-        NOTES_COL_GROWTH_W = 0.30
-        P2_DIM_LEADER_W = 1.00
-        P2_DIM_LEADER_H = 1.20
-        DETAIL_A_HORIZ_W = 4.80
-        DETAIL_A_HORIZ_H = 3.00
-        DETAIL_A_VERT_W = 3.00
-        DETAIL_A_VERT_H = 4.80
-        CONVENTIONAL_TARGET_BASE = 4.25
-        CONVENTIONAL_NOTES_DROP = 0.08
-        CONVENTIONAL_WIDE_BONUS = 0.25
-        CONVENTIONAL_SQUARE_DROP = 0.40
-        CONVENTIONAL_VERTICAL_PB = 0.05
-        P2_TARGET_BONUS = 0.50
-        GEOMETRY_SAFETY = 1.10
-
-        pb = "horizontal" if width >= 22.0 else "vertical"
-        
-        # Notes column width
-        notes_w = 0.0
-        if num_notes_p2 > 0:
-            notes_w = NOTES_COL_BASE_W + NOTES_COL_GROWTH_W * (num_notes_p2 - 1)
-            col_h_avail = SHEET_H - TITLE_BLOCK_H - 2 * MARGIN
-            needed_h = num_notes_p2 * NOTE_AVG_H
-            if needed_h > col_h_avail:
-                notes_w *= (needed_h / col_h_avail)
-            notes_w = min(notes_w, 6.0)
-
-        # Clear area
-        clear_w = SHEET_W - 2 * MARGIN - notes_w - PAGE_SEP_H
-        clear_h = SHEET_H - TITLE_BLOCK_H - 2 * MARGIN
-        if pb == "horizontal":
-            det_w, det_h = DETAIL_A_HORIZ_W, DETAIL_A_HORIZ_H
-        else:
-            det_w, det_h = DETAIL_A_VERT_W, DETAIL_A_VERT_H
-        view_w = clear_w - det_w - P2_DIM_LEADER_W
-        view_h = clear_h - P2_DIM_LEADER_H
-
-        n_required = max(width / max(0.5, view_w), height / max(0.5, view_h)) * GEOMETRY_SAFETY
-
-        # Conventional target
-        t = CONVENTIONAL_TARGET_BASE - CONVENTIONAL_NOTES_DROP * max(0, num_notes_p2 - 1)
-        r = width / height if height > 0 else 1.0
-        if r >= 1.2:
-            t += CONVENTIONAL_WIDE_BONUS
-        elif r <= 1/1.2:
-            pass
-        else:
-            t -= CONVENTIONAL_SQUARE_DROP
-        if pb == "vertical":
-            t -= CONVENTIONAL_VERTICAL_PB
-        target = max(2.5, t) + P2_TARGET_BONUS
-        
-        n_preferred = max(width, height) / target
-        
-        raw_n = max(n_required, n_preferred)
-        if raw_n <= 0:
-            return LADDER[0]
-        for s in LADDER:
-            if s >= raw_n:
-                return s
-        return LADDER[-1]
 
     def _update_sketch34_dimensions(self, swDrawing, W: float, H: float, powerBoxY: float, hangerY: float):
         log.info("Updating Sheet 2 Sketch34 mounting dimensions...")

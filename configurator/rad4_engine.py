@@ -13,8 +13,17 @@ Variable names preserve the original DW naming convention.
 """
 
 import math
+import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
+
+@dataclass
+class NoteBlock:
+    category: str
+    title: str
+    body_text: str
+
 
 
 # =============================================================================
@@ -196,6 +205,8 @@ class RAD4Result:
     DefoggerConfig:               str   = ""
     DefoggerQty:                  int   = 0
     ClockConfig:                  str   = ""
+    Notes:                        list[NoteBlock] = field(default_factory=list)
+
 
 
 
@@ -242,7 +253,11 @@ def build_cpn(inp: RAD4Inputs) -> str:
 
     # 5. Defogger
     if inp.Defogger:
-        cpn += "-DF"
+        if inp.Keen or inp.DimmingType == "D1":
+            cpn += "-DFX"
+        else:
+            cpn += "-DF"
+
 
     # 6. Lighting (Only append if standard output -SO. LO, LSE, and LHE are omitted)
     if inp.Lighting == "SO":
@@ -946,8 +961,112 @@ def run(inp: RAD4Inputs) -> RAD4Result:
     else:
         r.ClockConfig = "Delete"
 
+    # 15.5 Notes Configuration
+    bundle_code_path = str(Path(__file__).parent / "RAD4_Configurator_Bundle" / "code")
+    if bundle_code_path not in sys.path:
+        sys.path.insert(0, bundle_code_path)
+    
+    from rad4_rules_engine import select_notes
+    selected_notes = select_notes(r.CPN)
+    
+    notes_list = []
+    # Order: SPECIFICATION, ATTENTION, DEFOGGER, DEFOGGER DISCLAIMER, DIMMING, CLOCK, WALL GLOW
+    if "SPECIFICATION" in selected_notes:
+        notes_list.append(NoteBlock(
+            category="SPECIFICATION",
+            title="SPECIFICATION",
+            body_text=selected_notes["SPECIFICATION"]
+        ))
+    if "ATTENTION" in selected_notes:
+        notes_list.append(NoteBlock(
+            category="ATTENTION",
+            title="ATTENTION",
+            body_text=selected_notes["ATTENTION"]
+        ))
+    if "DEFOGGER" in selected_notes:
+        notes_list.append(NoteBlock(
+            category="DEFOGGER",
+            title="DEFOGGER SPECIFICATIONS",
+            body_text=selected_notes["DEFOGGER"]
+        ))
+    if "DEFOGGER DISCLAIMER (KEEN)" in selected_notes:
+        notes_list.append(NoteBlock(
+            category="DEFOGGER DISCLAIMER (KEEN)",
+            title="KEEN / DEFOGGER DISCLAIMER",
+            body_text=selected_notes["DEFOGGER DISCLAIMER (KEEN)"]
+        ))
+    if "DIMMING" in selected_notes:
+        notes_list.append(NoteBlock(
+            category="DIMMING",
+            title="DIMMER COMPATIBILITY",
+            body_text=selected_notes["DIMMING"]
+        ))
+
+    if inp.Ava:
+        notes_list.append(NoteBlock(
+            category="BUTTON",
+            title="AVA 1-TOUCH CONTROL BUTTON",
+            body_text="SEE SPECIFICATION SHEET FOR ADDITIONAL DETAILS"
+        ))
+    elif inp.Keen:
+        notes_list.append(NoteBlock(
+            category="BUTTON",
+            title="KEEN 1-TOUCH CONTROL BUTTON",
+            body_text="SEE SPECIFICATION SHEET FOR ADDITIONAL DETAILS"
+        ))
+    elif inp.Vive:
+        notes_list.append(NoteBlock(
+            category="BUTTON",
+            title="VIVE CONTROL BUTTON",
+            body_text="SEE SPECIFICATION SHEET FOR ADDITIONAL DETAILS"
+        ))
+        
+    if inp.Clock and inp.ClockType in ("CK2", "CK3"):
+        if inp.ClockType == "CK3":
+            clock_text = "PLUG-IN EXTERNAL 5V POWER SUPPLY 120 VOLTS INPUT, 50-60Hz 2.0 WATTS"
+        else:
+            clock_text = "CONNECTED TO MAIN LINE-IN; POWERS ON WITH LIGHTS, INTERNAL BATTERY KEEPS TIME SET 120-240 VAC INPUT 50-60Hz 2.0 WATTS"
+        notes_list.append(NoteBlock(
+            category="CLOCK",
+            title="CLOCK POWER REQUIREMENTS",
+            body_text=clock_text
+        ))
+        
+    if inp.WallGlow and inp.WallGlowType == "WG3":
+        wg_length = 2 * (inp.UnitWidth + inp.UnitHeight) - 16
+        if round(inp.UnitWidth) == 21 and round(inp.UnitHeight) == 42:
+            wg_length = 111
+        
+        wg_watts = round(wg_length * 3.66 / 12.0)
+        wg_lumens = round(wg_length * 301.0 / 12.0)
+        cct_map = {
+            "27K": "2,700",
+            "30K": "3,000",
+            "35K": "3,500",
+            "40K": "4,000"
+        }
+        cct_val = cct_map.get(inp.LEDColorTemp, "3,000")
+        
+        wg_text = (
+            f"LED TYPE: REPLACEABLE FLEX STRIP\n"
+            f"LENGTH (IN): {wg_length}\n"
+            f"WATTAGE (W): {wg_watts}\n"
+            f"CALCULATED L70 LIFESPAN (HRS): 140,000\n"
+            f"CCT(K): {cct_val}\n"
+            f"TOTAL INITIAL LUMENS PER FIXTURE: {wg_lumens:,} @ 302 LM/FT\n"
+            f"CRI: 90+"
+        )
+        notes_list.append(NoteBlock(
+            category="WALL GLOW",
+            title="WALL GLOW LED SPECIFICATION",
+            body_text=wg_text
+        ))
+        
+    r.Notes = notes_list
+
     # 15. BOM
     r.BOM = build_bom(inp, r)
+
 
 
     # 16. SolidWorks file paths
