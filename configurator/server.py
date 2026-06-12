@@ -40,7 +40,7 @@ class ConfigRequest(BaseModel):
     UnitWidth:       float  = 36.0
     UnitHeight:      float  = 36.0
     MountType:       str    = "RM"
-    Lighting:        str    = "LSE"
+    Lighting:        str    = "LO"
     LEDColorTemp:    str    = "30K"
     Finish:          str    = "NK04"
     Voltage:         str    = "Standard"
